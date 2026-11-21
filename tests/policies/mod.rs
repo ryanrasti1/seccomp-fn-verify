@@ -1,4 +1,4 @@
-//! Example policies: each construct of the subset, compiled by `seccomp_fn::compile!` (each call
+//! Example policies: each construct of the subset, compiled by `seccomp_fn::bpf!` (each call
 //! naming its module from the file's root: the file has a `policy` per module), each
 //! with its Kani harness (`seccomp_fn_verify::prove!`). A copy of seccomp-fn's
 //! `examples/policies.rs` (its `tests/examples.rs`: sampled, and its proofs): here the inputs of
@@ -37,7 +37,7 @@ pub mod readme {
     }
 
     pub fn filter(pid: u64) -> Vec<sock_filter> {
-        seccomp_fn::compile!(readme::policy(pid))
+        seccomp_fn::bpf!(readme::policy(pid))
     }
 
     #[cfg(kani)]
@@ -85,7 +85,7 @@ pub mod compares {
     }
 
     pub fn filter(lo: u64, hi: u64, strict: bool, level: Level) -> Vec<sock_filter> {
-        seccomp_fn::compile!(compares::policy(lo, hi, strict, level))
+        seccomp_fn::bpf!(compares::policy(lo, hi, strict, level))
     }
 
     // A harness per shape: one with the bool and the enum symbolic ran over 35 minutes.
@@ -129,7 +129,7 @@ pub mod table {
     }
 
     pub fn filter(pid: u64, allow_exit: bool) -> Vec<sock_filter> {
-        seccomp_fn::compile!(table::policy(pid, allow_exit))
+        seccomp_fn::bpf!(table::policy(pid, allow_exit))
     }
 
     // A harness per value of the bool (with it symbolic: over 400 s).
@@ -158,7 +158,7 @@ pub mod guarded {
     }
 
     pub fn filter(pid: u64, on: bool) -> Vec<sock_filter> {
-        seccomp_fn::compile!(guarded::policy(pid, on))
+        seccomp_fn::bpf!(guarded::policy(pid, on))
     }
 
     // A harness per value of the bool (with it symbolic: over 400 s).
@@ -209,7 +209,7 @@ pub mod halves {
     }
 
     pub fn filter(v: u64, w: u32) -> Vec<sock_filter> {
-        seccomp_fn::compile!(halves::policy(v, w))
+        seccomp_fn::bpf!(halves::policy(v, w))
     }
 
     // (its program: over 100 instructions, the default bound)
@@ -234,7 +234,7 @@ pub mod abi {
     }
 
     pub fn filter() -> Vec<sock_filter> {
-        seccomp_fn::compile!(abi::policy())
+        seccomp_fn::bpf!(abi::policy())
     }
 
     #[cfg(kani)]
@@ -273,6 +273,6 @@ pub mod long {
     }
 
     pub fn filter(k: u64) -> Vec<sock_filter> {
-        seccomp_fn::compile!(long::policy(k))
+        seccomp_fn::bpf!(long::policy(k))
     }
 }

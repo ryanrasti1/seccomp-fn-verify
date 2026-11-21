@@ -13,7 +13,7 @@ libc = "0.2"
 [dev-dependencies]
 # The compiler, only to make the kernel test's inputs (tests/policies): what is checked is
 # run_bpf, against Linux. Not a dependency of the crate.
-seccomp-fn = { git = "ssh://git@github.com/ryanrasti1/seccomp-fn.git", rev = "1454485e69ff266c1be968822579b0e3f2c1fa07" }
+seccomp-fn = { git = "ssh://git@github.com/ryanrasti1/seccomp-fn.git", rev = "874f736193d1c08db8b6afb3d133ad2a22362faf" }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }
