@@ -16,13 +16,23 @@
 //!
 //! # The rule
 //!
-//! Nothing here relies on a trait, type or item the compiler could emit or implement. The
-//! policy and the filter are taken as plain functions through this crate's own blanket impls
-//! ([`Policy`], [`Filter`]: over std's `Fn`, which nothing else can implement for a function
-//! item), the inputs are made here (`kani::any()` for each param and each field of libc's
-//! `seccomp_data`, no `kani::assume`), the program is run here ([`run_bpf`]), and the sampled
-//! check finds the constants to sample around in the program itself. A compiler that emits
-//! anything at all can only make the proof fail.
+//! Nothing here relies on a trait, type or item the compiler could emit or implement. Its
+//! expansion is an expression, but an expression can hold items (`impl`s among them), so:
+//! the policy and the filter are taken as plain functions through this crate's own blanket
+//! impls ([`Policy`], [`Filter`]: over std's `Fn`, which nothing else can implement for a
+//! function item); a symbolic param is a [`Symbolic`] type, a trait sealed here and implemented
+//! only for the unsigned integers and `bool` (and tuples of them), whose values are Kani's own
+//! `kani::any()` (an `impl kani::Arbitrary` emitted for an enum can't reach the proof); an enum
+//! param is given by its listed values ([`policy!`]), each list a `match` with no wildcard; the
+//! `seccomp_data` is made here, field by field, no `kani::assume`; the program is run here
+//! ([`run_bpf`]); and the sampled check finds the constants to sample around in the program
+//! itself. A compiler that emits anything at all can only make the proof fail.
+//!
+//! Two things the rule doesn't cover, the policy's author's to keep: the trait impls the
+//! policy itself uses on an enum param (its `==`: derive `PartialEq`, and an impl the compiler
+//! emitted would then conflict and not compile); and `cfg(kani)`: the proof is of the program
+//! as built with `cfg(kani)` set, and an expansion could build another without it. The tests
+//! (`check_sampled`, and run_bpf against Linux) run the build without it.
 
 mod bpf;
 pub use bpf::{MAX_INSNS, run_bpf};
@@ -69,29 +79,88 @@ arity!(A, B, C, D);
 arity!(A, B, C, D, E);
 arity!(A, B, C, D, E, G);
 
-/// The proof's assertion, for every input: params and `seccomp_data` symbolic, each param a
-/// `kani::any()` (its type's `Arbitrary`: all its values), the program run by [`run_bpf`] (which
-/// also asserts the kernel would take it).
-#[cfg(kani)]
-pub fn prove<Args: Copy + kani::Arbitrary>(policy: impl Policy<Args>, filter: impl Filter<Args>) {
-    prove_at(policy, filter, kani::any())
+/// A param type the proof makes symbolic: every value of it, by Kani's own `kani::any()`.
+/// Sealed: implemented here, for the unsigned integers, `bool` and tuples of them, and nowhere
+/// else (an enum's values are listed instead, [`policy!`]), so no impl the compiler emits can
+/// narrow the values a proof covers:
+///
+/// ```compile_fail
+/// #[derive(Clone, Copy)]
+/// enum Mode { A, B }
+/// impl seccomp_fn_verify::Symbolic for Mode {}
+/// ```
+pub trait Symbolic: sealed::Sealed + Copy {
+    #[cfg(kani)]
+    #[doc(hidden)]
+    fn any() -> Self;
 }
 
-/// [`prove`] for params `args` (some of them concrete: `policy!`'s list of values).
+mod sealed {
+    pub trait Sealed {}
+}
+
+macro_rules! symbolic {
+    ($($t:ty),*) => {$(
+        impl sealed::Sealed for $t {}
+        impl Symbolic for $t {
+            #[cfg(kani)]
+            fn any() -> Self {
+                ::kani::any()
+            }
+        }
+    )*};
+}
+symbolic!(u8, u16, u32, u64, u128, usize, bool);
+
+macro_rules! symbolic_tuple {
+    ($($a:ident),*) => {
+        impl<$($a: Symbolic),*> sealed::Sealed for ($($a,)*) {}
+        impl<$($a: Symbolic),*> Symbolic for ($($a,)*) {
+            #[cfg(kani)]
+            fn any() -> Self {
+                ($($a::any(),)*)
+            }
+        }
+    };
+}
+symbolic_tuple!();
+symbolic_tuple!(A);
+symbolic_tuple!(A, B);
+symbolic_tuple!(A, B, C);
+symbolic_tuple!(A, B, C, D);
+symbolic_tuple!(A, B, C, D, E);
+symbolic_tuple!(A, B, C, D, E, G);
+
+/// `kani::any()` of a [`Symbolic`] type: a `policy!` param `_`, or a payload's.
+#[cfg(kani)]
+#[doc(hidden)]
+pub fn any<T: Symbolic>() -> T {
+    T::any()
+}
+
+/// The proof's assertion, for every input: params and `seccomp_data` symbolic, each param
+/// [`Symbolic`] (all its values), the program run by [`run_bpf`] (which also asserts the kernel
+/// would take it).
+#[cfg(kani)]
+pub fn prove<Args: Symbolic>(policy: impl Policy<Args>, filter: impl Filter<Args>) {
+    prove_at(policy, filter, Args::any())
+}
+
+/// [`prove`] for params `args`: `policy!`'s, each [`any`] or one of a list of values.
 #[cfg(kani)]
 pub fn prove_at<Args: Copy>(policy: impl Policy<Args>, filter: impl Filter<Args>, args: Args) {
-    let d = seccomp_data { nr: kani::any(), arch: kani::any(), instruction_pointer: kani::any(), args: kani::any() };
+    let d = seccomp_data { nr: ::kani::any(), arch: ::kani::any(), instruction_pointer: ::kani::any(), args: ::kani::any() };
     assert_eq!(run_bpf(&filter.program(args), &d), policy.verdict(args, &d));
 }
 
 /// The Kani harness for `policy` and `filter` (functions of the same params), in a module of its
 /// own here: `<module>::policy_proof::policy_is_filter` (one per module), every param
-/// `kani::any()`. `unwind` bounds the program's length (default 100).
+/// [`Symbolic`]. `unwind` bounds the program's length (default 100).
 ///
-/// `(…)` instead gives each param in order: `_` (`kani::any()`), or a fieldless enum's or a
+/// `(…)` instead gives each param in order: `_` ([`any`]: a [`Symbolic`] type), or a fieldless enum's or a
 /// bool's values, each named: `Mode = [coroutine: Coroutine, fork: Fork]`, `bool = [off: false,
 /// on: true]`, or an enum's variants with a payload left symbolic, `Option<u64> = [none: None,
-/// some: Some(_)]`. A harness is proved for each combination of the listed values
+/// some: Some(_)]` (the payload [`Symbolic`]). A harness is proved for each combination of the listed values
 /// (`policy_proof::coroutine::off::proof`), and each list is a `match` with no wildcard, so a
 /// value left out (a variant added later) doesn't compile: the list covers the type.
 #[macro_export]
@@ -102,8 +171,8 @@ macro_rules! policy {
     ($policy:ident, $filter:ident, unwind = $u:literal) => {
         #[cfg(kani)]
         mod policy_proof {
-            #[kani::proof]
-            #[kani::unwind($u)]
+            #[::kani::proof]
+            #[::kani::unwind($u)]
             fn policy_is_filter() {
                 $crate::prove(super::$policy, super::$filter)
             }
@@ -125,14 +194,14 @@ macro_rules! policy {
 #[macro_export]
 macro_rules! __policy_cases {
     ($u:tt [$($done:expr,)*]) => {
-        #[kani::proof]
-        #[kani::unwind($u)]
+        #[::kani::proof]
+        #[::kani::unwind($u)]
         fn proof() {
             $crate::prove_at(__policy, __filter, ($($done,)*))
         }
     };
     ($u:tt [$($done:expr,)*] _ $(, $($rest:tt)*)?) => {
-        $crate::__policy_cases!($u [$($done,)* kani::any(),] $($($rest)*)?);
+        $crate::__policy_cases!($u [$($done,)* $crate::any(),] $($($rest)*)?);
     };
     ($u:tt [$($done:expr,)*] bool = [$($n:ident : $v:literal),* $(,)?] $(, $($rest:tt)*)?) => {
         fn __covers(x: bool) {
@@ -151,7 +220,7 @@ macro_rules! __policy_cases {
         $crate::__policy_values!($u [$($done,)*] [$($n: $t::$v,)*] [$($($rest)*)?]);
     };
     // An enum's variants, a payload symbolic: `Option<u64> = [none: None, some: Some(_)]`, the
-    // harness's value `Some(kani::any())`, the match's pattern `Some(_)`.
+    // harness's value `Some($crate::any())`, the match's pattern `Some(_)`.
     ($u:tt [$($done:expr,)*] $t:ty = [$($n:ident : $v:ident $(($p:tt))?),* $(,)?] $(, $($rest:tt)*)?) => {
         fn __covers(x: $t) {
             match x {
@@ -162,12 +231,12 @@ macro_rules! __policy_cases {
     };
 }
 
-/// `_` in a `policy!` payload: `kani::any()`.
+/// `_` in a `policy!` payload: [`any`], of a [`Symbolic`] type.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __any {
     (_) => {
-        kani::any()
+        $crate::any()
     };
 }
 
