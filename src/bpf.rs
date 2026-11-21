@@ -103,8 +103,10 @@ pub const MAX_INSNS: usize = libc::BPF_MAXINSNS as usize;
 ///
 /// A program the kernel would refuse to install panics: empty or too long, an opcode seccomp
 /// doesn't take, a jump out of the program, a load out of `seccomp_data`, a division by a
-/// constant 0 or a shift by 32 or more, a scratch slot past the last, or a last instruction that
-/// isn't a return (net/core/filter.c `bpf_check_classic`). So a proof that calls this also
+/// constant 0 or a shift by 32 or more, a scratch slot past the last, a last instruction that
+/// isn't a return (net/core/filter.c `bpf_check_classic`), or a load of a scratch slot not
+/// stored on every path to it (`check_load_and_stores`; in a proof, any load of scratch memory:
+/// see `check`). So a proof that calls this also
 /// proves the kernel takes the program.
 pub fn run_bpf(prog: &[SockFilter], d: &SeccompData) -> u32 {
     check(prog);
@@ -214,6 +216,7 @@ fn step(s: &mut State, SockFilter { code, jt, jf, k }: SockFilter, d: &SeccompDa
 /// `seccomp_check_filter`'s list of opcodes): panics on the first it fails.
 fn check(prog: &[SockFilter]) {
     assert!(!prog.is_empty() && prog.len() <= MAX_INSNS, "{} instructions", prog.len());
+    let mut loads = false;
     for (pc, &SockFilter { code, jt, jf, k }) in prog.iter().enumerate() {
         let left = prog.len() - pc - 1;
         let mem = (k as usize) < MEMWORDS;
@@ -221,7 +224,10 @@ fn check(prog: &[SockFilter]) {
             // seccomp_check_filter: inside seccomp_data, aligned (every such word is a field's)
             LD_W_ABS => k % 4 == 0 && k < DATA_LEN,
             LD_W_IMM | LDX_W_IMM | LD_W_LEN | LDX_W_LEN => true,
-            LD_MEM | LDX_MEM => mem,
+            LD_MEM | LDX_MEM => {
+                loads = true;
+                mem
+            }
             _ if code == ST || code == STX => mem,
             ADD_K | SUB_K | MUL_K | OR_K | AND_K | XOR_K | NEG => true,
             ADD_X | SUB_X | MUL_X | OR_X | AND_X | XOR_X | DIV_X | LSH_X | RSH_X => true,
@@ -236,5 +242,49 @@ fn check(prog: &[SockFilter]) {
     }
     let last = prog[prog.len() - 1].code;
     assert!(last == RET_K || last == RET_A, "the last instruction isn't a return");
+    // Its only refusal is at a load of scratch memory: a program without one is taken. In a
+    // proof, a program with one is refused outright, more strictly than the kernel (which is
+    // sound: the proof then fails), as `compile!` emits none: the walk, even never taken (the
+    // solver doesn't know the program's opcodes), made each proof 4-6x slower (readme's 15 s
+    // to 65-98 s). The tests run the walk, the kernel's.
+    #[cfg(kani)]
+    assert!(!loads, "a load of scratch memory: not in a proof");
+    #[cfg(not(kani))]
+    if loads {
+        check_load_and_stores(prog);
+    }
+}
+
+/// net/core/filter.c `check_load_and_stores`, line for line: a load of scratch slot `k` is
+/// refused (EINVAL) unless every path to it stores `k` first. `valid` holds a bit per slot
+/// stored so far on the path falling through; `masks[pc]`, the slots stored on every jump to
+/// `pc`. As the kernel's, it is by instruction, not by reachability: a jump leaves `valid` all
+/// ones (what falls through after it is reached only by jumps, which `masks` has), and a return
+/// leaves it as it is, so an unreachable load after a return is taken if its slot was stored
+/// before the return. (Without this, `[LD M[0], RET A]` was taken here and refused by Linux.)
+/// Runs after `check`'s loop, as the kernel's after its own: every `k` of a memory instruction
+/// is a slot, every jump inside the program.
+#[cfg(not(kani))]
+fn check_load_and_stores(prog: &[SockFilter]) {
+    const _: () = assert!(MEMWORDS <= 16, "a u16 per instruction, a bit per slot");
+    let mut masks = vec![u16::MAX; prog.len()];
+    let mut valid: u16 = 0;
+    for (pc, &SockFilter { code, jt, jf, k }) in prog.iter().enumerate() {
+        valid &= masks[pc];
+        match code {
+            _ if code == ST || code == STX => valid |= 1 << k,
+            LD_MEM | LDX_MEM => assert!(valid & 1 << k != 0, "instruction {pc} the kernel refuses: a load of M[{k}] not stored on every path"),
+            JA => {
+                masks[pc + 1 + k as usize] &= valid;
+                valid = u16::MAX;
+            }
+            JEQ_K | JGT_K | JGE_K | JSET_K | JEQ_X | JGT_X | JGE_X | JSET_X => {
+                masks[pc + 1 + jt as usize] &= valid;
+                masks[pc + 1 + jf as usize] &= valid;
+                valid = u16::MAX;
+            }
+            _ => {}
+        }
+    }
 }
 

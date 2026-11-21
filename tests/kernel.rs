@@ -94,7 +94,8 @@ fn expected(verdict: u32) -> Outcome {
         SECCOMP_RET_ALLOW => Outcome::Allowed,
         SECCOMP_RET_ERRNO => Outcome::Errno(verdict & 0xffff),
         SECCOMP_RET_TRAP => Outcome::Trapped,
-        SECCOMP_RET_KILL_PROCESS => Outcome::Killed,
+        // (KILL_THREAD, 0, is a division by X == 0's: the child's only thread, so the process)
+        SECCOMP_RET_KILL_PROCESS | libc::SECCOMP_RET_KILL_THREAD => Outcome::Killed,
         v => panic!("verdict {v:#x}"),
     }
 }
@@ -111,6 +112,8 @@ fn kernel(prog: &[SockFilter], d: &SeccompData) -> Outcome {
     match unsafe { libc::fork() } {
         0 => unsafe {
             libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+            // no core dump of a child killed by SIGSYS: each one took ~100 ms
+            libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0);
             libc::signal(libc::SIGSYS, trapped as *const () as libc::sighandler_t);
             if install(prog).is_err() {
                 libc::_exit(201);
@@ -294,4 +297,185 @@ fn abi_as_linux() {
     let d = SeccompData { nr: 20, arch: AUDIT_ARCH_I386, instruction_pointer: probe80_ip(), args: [0; 6] };
     assert_eq!(run_bpf(&p, &d), SECCOMP_RET_KILL_PROCESS);
     assert_eq!(kernel(&p, &d), Outcome::Killed);
+}
+
+/// Operand values at the edges: 0, 1, around a shift's width, the sign bit, all ones, and one
+/// whose nibbles all differ.
+const EDGES: [u32; 8] = [0, 1, 31, 32, 33, 0x8000_0000, 0xffff_ffff, 0x1234_5678];
+
+fn i(code: u16, jt: u8, jf: u8, k: u32) -> SockFilter {
+    SockFilter { code, jt, jf, k }
+}
+
+/// `body` run with A = args[0]'s low half and X = args[1]'s, for each `(a, x)` of `regs`.
+fn with_regs(body: &[SockFilter]) -> Vec<SockFilter> {
+    let mut p = vec![i(0x20, 0, 0, 24), i(0x07, 0, 0, 0), i(0x20, 0, 0, 16)];
+    p.extend_from_slice(body);
+    p
+}
+
+fn calls(regs: &[(u32, u32)]) -> Vec<(u32, [u64; 6])> {
+    regs.iter().map(|&(a, x)| (NONE, [a as u64, x as u64, 0, 0, 0, 0])).collect()
+}
+
+/// A after `body` (as `with_regs`), the kernel's and run_bpf's the same: a verdict's errno is
+/// 16 bits and the child's exit status 8, so A is read out a nibble per program, errno 100 + it.
+fn same_a(body: &[SockFilter], regs: &[(u32, u32)]) {
+    for j in 0..8 {
+        let mut p = with_regs(body);
+        p.extend([i(0x74, 0, 0, 4 * j), i(0x54, 0, 0, 0xf), i(0x04, 0, 0, 100), i(0x44, 0, 0, SECCOMP_RET_ERRNO), i(0x16, 0, 0, 0)]);
+        same(&p, &calls(regs));
+    }
+}
+
+fn pairs() -> Vec<(u32, u32)> {
+    EDGES.iter().flat_map(|&a| EDGES.map(|x| (a, x))).collect()
+}
+
+/// Each ALU op by a constant, each edge constant the kernel takes (a division by 0 and a shift
+/// by 32 or more it refuses: `accepts_as_linux`), on each edge A.
+#[test]
+fn alu_k_as_linux() {
+    let regs: Vec<(u32, u32)> = EDGES.map(|a| (a, 0)).to_vec();
+    // ADD SUB MUL DIV OR AND LSH RSH XOR
+    for op in [0x04, 0x14, 0x24, 0x34, 0x44, 0x54, 0x64, 0x74, 0xa4] {
+        for k in EDGES {
+            if (op == 0x34 && k == 0) || ((op == 0x64 || op == 0x74) && k >= 32) {
+                continue;
+            }
+            same_a(&[i(op, 0, 0, k)], &regs);
+        }
+    }
+}
+
+/// Each ALU op by X, and NEG, on each pair of edge values: a division by X == 0 (the program
+/// ends, verdict 0), a shift by X of 32 or more.
+#[test]
+fn alu_x_as_linux() {
+    for op in [0x0c, 0x1c, 0x2c, 0x3c, 0x4c, 0x5c, 0x6c, 0x7c, 0xac, 0x84] {
+        same_a(&[i(op, 0, 0, 0)], &pairs());
+    }
+}
+
+/// The loads but from `seccomp_data`: immediates, LEN, scratch memory by A and X, TAX, TXA.
+#[test]
+fn loads_as_linux() {
+    let regs = pairs();
+    for k in EDGES {
+        same_a(&[i(0x00, 0, 0, k)], &regs[..1]); // A = k
+        same_a(&[i(0x01, 0, 0, k), i(0x87, 0, 0, 0)], &regs[..1]); // X = k; A = X
+    }
+    same_a(&[i(0x80, 0, 0, 0)], &regs[..1]); // A = len
+    same_a(&[i(0x81, 0, 0, 0), i(0x87, 0, 0, 0)], &regs[..1]); // X = len; A = X
+    let mem = [
+        i(0x03, 0, 0, 15), // M[15] = X
+        i(0x02, 0, 0, 0),  // M[0] = A
+        i(0x00, 0, 0, 7),  // A = 7
+        i(0x02, 0, 0, 7),  // M[7] = A
+        i(0x60, 0, 0, 15), // A = M[15]
+        i(0x61, 0, 0, 0),  // X = M[0]
+        i(0x1c, 0, 0, 0),  // A -= X
+        i(0x61, 0, 0, 7),  // X = M[7]
+        i(0x2c, 0, 0, 0),  // A *= X
+    ];
+    same_a(&mem, &regs);
+}
+
+/// Each conditional jump, by a constant and by X, on each pair of edge values.
+#[test]
+fn jumps_as_linux() {
+    let regs = pairs();
+    let tail = [i(0x06, 0, 0, SECCOMP_RET_ERRNO | 101), i(0x06, 0, 0, SECCOMP_RET_ERRNO | 102)];
+    // JEQ JGT JGE JSET
+    for op in [0x15, 0x25, 0x35, 0x45] {
+        for k in EDGES {
+            let mut p = with_regs(&[i(op, 0, 1, k)]);
+            p.extend(tail);
+            same(&p, &calls(&regs));
+        }
+        let mut p = with_regs(&[i(op | 0x08, 0, 1, 0)]);
+        p.extend(tail);
+        same(&p, &calls(&regs));
+    }
+    // JA, and a conditional jump's both offsets past an instruction
+    let mut p = with_regs(&[i(0x05, 0, 0, 1), i(0x06, 0, 0, SECCOMP_RET_ERRNO | 103), i(0x1d, 1, 2, 0), i(0x06, 0, 0, SECCOMP_RET_ERRNO | 104)]);
+    p.extend(tail);
+    same(&p, &calls(&regs));
+}
+
+/// Whether the kernel takes `prog` (behind the prefix, which leaves the program's scratch
+/// memory as unstored as at a program's start).
+fn kernel_accepts(prog: &[SockFilter]) -> bool {
+    let p = behind_prefix(prog, probe_ip());
+    // SAFETY: as `kernel`'s child.
+    match unsafe { libc::fork() } {
+        0 => unsafe {
+            libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+            libc::_exit(if install(&p).is_ok() { 0 } else { 1 })
+        },
+        pid => {
+            let mut st = 0;
+            // SAFETY: waits for the child.
+            assert_eq!(unsafe { libc::waitpid(pid, &mut st, 0) }, pid);
+            assert!(libc::WIFEXITED(st), "the child: {st:#x}");
+            libc::WEXITSTATUS(st) == 0
+        }
+    }
+}
+
+/// Programs at the edge of what the kernel takes: its verdict, and `run_bpf`'s (which panics on
+/// a program the kernel refuses), the table's.
+#[test]
+fn accepts_as_linux() {
+    const R: u16 = 0x06; // RET k
+    let table: &[(&str, bool, &[SockFilter])] = &[
+        ("a return", true, &[i(0x06, 0, 0, 0)]),
+        // scratch memory (check_load_and_stores): a load of a slot stored on every path only
+        ("M[0] loaded, never stored", false, &[i(0x60, 0, 0, 0), i(0x16, 0, 0, 0)]),
+        ("M[15] loaded into X, never stored", false, &[i(0x61, 0, 0, 15), i(0x16, 0, 0, 0)]),
+        ("M[0] stored, loaded", true, &[i(0x02, 0, 0, 0), i(0x60, 0, 0, 0), i(0x16, 0, 0, 0)]),
+        ("M[0] stored by X, loaded into X", true, &[i(0x03, 0, 0, 0), i(0x61, 0, 0, 0), i(0x16, 0, 0, 0)]),
+        ("M[1] stored, M[0] loaded", false, &[i(0x02, 0, 0, 1), i(0x60, 0, 0, 0), i(0x16, 0, 0, 0)]),
+        ("M[0] stored on one path", false, &[i(0x15, 0, 1, 0), i(0x02, 0, 0, 0), i(0x60, 0, 0, 0), i(0x16, 0, 0, 0)]),
+        ("M[3] stored before the branch", true, &[i(0x02, 0, 0, 3), i(0x15, 0, 1, 0), i(0x02, 0, 0, 0), i(0x60, 0, 0, 3), i(0x16, 0, 0, 0)]),
+        ("a JA over the store", false, &[i(0x05, 0, 0, 1), i(0x02, 0, 0, 0), i(0x60, 0, 0, 0), i(0x16, 0, 0, 0)]),
+        ("a JA after the store", true, &[i(0x02, 0, 0, 0), i(0x05, 0, 0, 0), i(0x60, 0, 0, 0), i(0x16, 0, 0, 0)]),
+        // the kernel's, by instruction: a return doesn't clear what's stored, a jump sets all
+        ("M[0] loaded after a return, never stored", false, &[i(R, 0, 0, 0), i(0x60, 0, 0, 0), i(0x16, 0, 0, 0)]),
+        ("M[0] loaded after a return, stored before it", true, &[i(0x02, 0, 0, 0), i(R, 0, 0, 0), i(0x60, 0, 0, 0), i(0x16, 0, 0, 0)]),
+        ("M[0] loaded where only a jump goes, not stored", false, &[i(0x15, 1, 1, 0), i(R, 0, 0, 0), i(0x60, 0, 0, 0), i(0x16, 0, 0, 0)]),
+        ("M[16] stored", false, &[i(0x02, 0, 0, 16), i(R, 0, 0, 0)]),
+        ("M[16] loaded", false, &[i(0x60, 0, 0, 16), i(0x16, 0, 0, 0)]),
+        // constants
+        ("A / 0", false, &[i(0x34, 0, 0, 0), i(0x16, 0, 0, 0)]),
+        ("A / 1", true, &[i(0x34, 0, 0, 1), i(0x16, 0, 0, 0)]),
+        ("A << 31", true, &[i(0x64, 0, 0, 31), i(0x16, 0, 0, 0)]),
+        ("A << 32", false, &[i(0x64, 0, 0, 32), i(0x16, 0, 0, 0)]),
+        ("A >> 32", false, &[i(0x74, 0, 0, 32), i(0x16, 0, 0, 0)]),
+        // loads from seccomp_data
+        ("the last word", true, &[i(0x20, 0, 0, 60), i(0x16, 0, 0, 0)]),
+        ("past the last word", false, &[i(0x20, 0, 0, 64), i(0x16, 0, 0, 0)]),
+        ("an unaligned word", false, &[i(0x20, 0, 0, 2), i(0x16, 0, 0, 0)]),
+        ("a half word", false, &[i(0x28, 0, 0, 0), i(0x16, 0, 0, 0)]),
+        ("a byte", false, &[i(0x30, 0, 0, 0), i(0x16, 0, 0, 0)]),
+        ("an indirect word", false, &[i(0x40, 0, 0, 0), i(0x16, 0, 0, 0)]),
+        ("X = 4 * (byte & 0xf)", false, &[i(0xb1, 0, 0, 0), i(0x16, 0, 0, 0)]),
+        // opcodes seccomp doesn't take
+        ("A % 3", false, &[i(0x94, 0, 0, 3), i(0x16, 0, 0, 0)]),
+        ("A % X", false, &[i(0x9c, 0, 0, 0), i(0x16, 0, 0, 0)]),
+        ("return X", false, &[i(0x0e, 0, 0, 0)]),
+        ("opcode 0xff", false, &[i(0xff, 0, 0, 0), i(R, 0, 0, 0)]),
+        // jumps
+        ("a JA to the last", true, &[i(0x05, 0, 0, 0), i(R, 0, 0, 0)]),
+        ("a JA out", false, &[i(0x05, 0, 0, 1), i(R, 0, 0, 0)]),
+        ("a JEQ's jt out", false, &[i(0x15, 1, 0, 0), i(R, 0, 0, 0)]),
+        ("a JEQ X's jf out", false, &[i(0x1d, 0, 1, 0), i(R, 0, 0, 0)]),
+        ("the last not a return", false, &[i(R, 0, 0, 0), i(0x20, 0, 0, 0)]),
+    ];
+    let d = SeccompData { nr: NONE as i32, arch: AUDIT_ARCH_X86_64, instruction_pointer: 0, args: [0; 6] };
+    for &(what, takes, prog) in table {
+        assert_eq!(kernel_accepts(prog), takes, "the kernel: {what}");
+        let p = behind_prefix(prog, probe_ip());
+        assert_eq!(std::panic::catch_unwind(|| run_bpf(&p, &d)).is_ok(), takes, "run_bpf: {what}");
+    }
 }
