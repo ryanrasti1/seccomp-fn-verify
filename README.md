@@ -1,5 +1,7 @@
 # seccomp-fn-verify
-The trusted part of seccomp-fn: the proof that a seccomp filter's program is its policy, a plain Rust function. The compiler (`seccomp-fn`'s `compile!`) is not trusted; this crate checks whatever it emits. About 580 lines of source including comments (`src/lib.rs`, `src/bpf.rs`), one dependency, `libc`.
+The trusted part of seccomp-fn: the proof that a seccomp filter's program is its policy, a plain Rust function. The compiler (`compile!`, [seccomp-fn](https://github.com/ryanrasti1/seccomp-fn), its own repository) is not trusted; this crate checks whatever it emits. About 580 lines of source including comments (`src/lib.rs`, `src/bpf.rs`), one dependency, `libc`.
+
+Its tests: `cargo test` (`tests/sampled.rs`; `tests/kernel.rs`, `run_bpf` against Linux on seccomp-fn's example programs, `tests/policies`, a copy of them). Its flake: `lib.kaniCheck`, a crate's proofs as a derivation, and `lib.kani`, Kani 0.68 built for Nix.
 
 ## Claim & Guarantees
 For a policy `policy(params…) -> impl Fn(&libc::seccomp_data) -> u32` and a filter `filter(params…) -> Vec<libc::sock_filter>` (the same params), `seccomp_fn_verify::policy!(policy, filter)` emits a Kani harness proving
