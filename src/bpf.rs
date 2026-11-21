@@ -105,7 +105,7 @@ pub const MAX_INSNS: usize = libc::BPF_MAXINSNS as usize;
 /// doesn't take, a jump out of the program, a load out of `seccomp_data`, a division by a
 /// constant 0 or a shift by 32 or more, a scratch slot past the last, a last instruction that
 /// isn't a return (net/core/filter.c `bpf_check_classic`), or a load of a scratch slot not
-/// stored on every path to it (`check_load_and_stores`; in a proof, any load of scratch memory:
+/// stored on every path to it (`check_scratch_loads`; in a proof, any load of scratch memory:
 /// see `check`). So a proof that calls this also
 /// proves the kernel takes the program.
 pub fn run_bpf(prog: &[SockFilter], d: &SeccompData) -> u32 {
@@ -251,40 +251,48 @@ fn check(prog: &[SockFilter]) {
     assert!(!loads, "a load of scratch memory: not in a proof");
     #[cfg(not(kani))]
     if loads {
-        check_load_and_stores(prog);
+        check_scratch_loads(prog);
     }
 }
 
-/// net/core/filter.c `check_load_and_stores`, line for line: a load of scratch slot `k` is
-/// refused (EINVAL) unless every path to it stores `k` first. `valid` holds a bit per slot
-/// stored so far on the path falling through; `masks[pc]`, the slots stored on every jump to
-/// `pc`. As the kernel's, it is by instruction, not by reachability: a jump leaves `valid` all
-/// ones (what falls through after it is reached only by jumps, which `masks` has), and a return
-/// leaves it as it is, so an unreachable load after a return is taken if its slot was stored
-/// before the return. (Without this, `[LD M[0], RET A]` was taken here and refused by Linux.)
-/// Runs after `check`'s loop, as the kernel's after its own: every `k` of a memory instruction
-/// is a slot, every jump inside the program.
+/// The kernel's rule for scratch memory, as its behaviour is observed (`tests/kernel.rs`
+/// `accepts_as_linux`): a load of slot `k` is refused unless `k` is stored on every way into the
+/// load. One forward pass (jumps only go forward). Each instruction is entered by falling
+/// through from the one before and by the jumps that target it; the slots known stored at it
+/// are those stored on all of these. Two quirks, kept as the kernel has them, as the rule is by
+/// instruction, not by reachability:
+/// - nothing falls through a jump: after one, only the jumps into an instruction count (and an
+///   instruction no jump reaches knows every slot stored);
+/// - a return does fall through: an unreachable load after it is taken if its slot was stored
+///   before the return. (Without this, `[LD M[0], RET A]` was taken here and refused by Linux.)
+/// Runs after `check`'s loop: every `k` of a memory instruction is a slot, every jump inside.
 #[cfg(not(kani))]
-fn check_load_and_stores(prog: &[SockFilter]) {
-    const _: () = assert!(MEMWORDS <= 16, "a u16 per instruction, a bit per slot");
-    let mut masks = vec![u16::MAX; prog.len()];
-    let mut valid: u16 = 0;
-    for (pc, &SockFilter { code, jt, jf, k }) in prog.iter().enumerate() {
-        valid &= masks[pc];
-        match code {
-            _ if code == ST || code == STX => valid |= 1 << k,
-            LD_MEM | LDX_MEM => assert!(valid & 1 << k != 0, "instruction {pc} the kernel refuses: a load of M[{k}] not stored on every path"),
-            JA => {
-                masks[pc + 1 + k as usize] &= valid;
-                valid = u16::MAX;
+fn check_scratch_loads(prog: &[SockFilter]) {
+    const _: () = assert!(MEMWORDS <= 16, "a bit per slot in a u16");
+    const ALL: u16 = u16::MAX;
+    // by_jumps[pc]: the slots stored on every jump into pc so far (ALL: none yet).
+    let mut by_jumps = vec![ALL; prog.len()];
+    // the slots stored on the way falling through into the current instruction
+    let mut falling: u16 = 0;
+    for (pc, i) in prog.iter().enumerate() {
+        let stored = falling & by_jumps[pc];
+        let targets: &[usize] = match i.code {
+            JA => &[pc + 1 + i.k as usize],
+            JEQ_K | JGT_K | JGE_K | JSET_K | JEQ_X | JGT_X | JGE_X | JSET_X => &[pc + 1 + i.jt as usize, pc + 1 + i.jf as usize],
+            _ => &[],
+        };
+        let after = match i.code {
+            ST | STX => stored | 1 << i.k,
+            LD_MEM | LDX_MEM => {
+                assert!(stored & 1 << i.k != 0, "instruction {pc} the kernel refuses: a load of M[{}] not stored on every path", i.k);
+                stored
             }
-            JEQ_K | JGT_K | JGE_K | JSET_K | JEQ_X | JGT_X | JGE_X | JSET_X => {
-                masks[pc + 1 + jt as usize] &= valid;
-                masks[pc + 1 + jf as usize] &= valid;
-                valid = u16::MAX;
-            }
-            _ => {}
+            _ => stored,
+        };
+        for &t in targets {
+            by_jumps[t] &= after;
         }
+        falling = if targets.is_empty() { after } else { ALL };
     }
 }
 

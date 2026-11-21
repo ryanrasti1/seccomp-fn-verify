@@ -430,7 +430,7 @@ fn accepts_as_linux() {
     const R: u16 = 0x06; // RET k
     let table: &[(&str, bool, &[SockFilter])] = &[
         ("a return", true, &[i(0x06, 0, 0, 0)]),
-        // scratch memory (check_load_and_stores): a load of a slot stored on every path only
+        // scratch memory (check_scratch_loads): a load of a slot stored on every path only
         ("M[0] loaded, never stored", false, &[i(0x60, 0, 0, 0), i(0x16, 0, 0, 0)]),
         ("M[15] loaded into X, never stored", false, &[i(0x61, 0, 0, 15), i(0x16, 0, 0, 0)]),
         ("M[0] stored, loaded", true, &[i(0x02, 0, 0, 0), i(0x60, 0, 0, 0), i(0x16, 0, 0, 0)]),

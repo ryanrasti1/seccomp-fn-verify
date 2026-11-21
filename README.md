@@ -31,7 +31,7 @@ seccomp_fn_verify::policy!(policy, filter);
 `check_sampled(policy, filter, params, n)` is the same assertion on `n` sampled `seccomp_data`s, for a `#[test]`: fast feedback, not the guarantee.
 
 The claim then rests on:
-- `run_bpf` (`src/bpf.rs`) being classic BPF as the kernel's seccomp runs it: checked against Linux by installing programs in forked children and comparing verdicts (`tests/kernel.rs`): the examples, with argument values whose 32-bit halves differ, and each opcode on edge values (a division by X = 0, shifts by 32 and more, scratch memory, LEN, the jumps by X); and its checks being the kernel's (`bpf_check_classic`, `check_load_and_stores`, `seccomp_check_filter`): a table of programs each taken or refused by both Linux and `run_bpf` (`tests/kernel.rs` `accepts_as_linux`); in a proof, stricter: a program that loads scratch memory fails (`compile!` emits none; the walk made proofs 4-6x slower)
+- `run_bpf` (`src/bpf.rs`) being classic BPF as the kernel's seccomp runs it: checked against Linux by installing programs in forked children and comparing verdicts (`tests/kernel.rs`): the examples, with argument values whose 32-bit halves differ, and each opcode on edge values (a division by X = 0, shifts by 32 and more, scratch memory, LEN, the jumps by X); and its checks being the kernel's (`bpf_check_classic` with its rule for scratch memory, `seccomp_check_filter`): a table of programs each taken or refused by both Linux and `run_bpf` (`tests/kernel.rs` `accepts_as_linux`); in a proof, stricter: a program that loads scratch memory fails (`compile!` emits none; the walk made proofs 4-6x slower)
 - the harness (`prove`, `policy!` in `src/lib.rs`): every input made here, the policy called as written; the unwind bound an upper bound on the program's length (Kani fails an unwinding assertion rather than pass a short bound; `kaniCheck` refuses `--no-unwinding-assertions`)
 - the proof having run: `kaniCheck`'s `expectHarnesses`, each harness by name, else the build fails (a run that checked none passed before)
 - `Symbolic` being every value of its types: sealed here, implemented for the unsigned integers and `bool` only, each Kani's own `kani::any()`; nothing the compiler emits can implement it (an `impl kani::Arbitrary` it might emit is never used)
@@ -52,13 +52,16 @@ Nothing here relies on a trait, type or item the compiler could emit or implemen
 # Design
 1. `policy!(policy, filter)`: a `macro_rules` (no proc macro, no syn) emitting `mod policy_proof { #[kani::proof] fn policy_is_filter() { prove(super::policy, super::filter) } }`. With `unwind = N` it bounds the program's length (default 100); with `(…)` each param in order, `_` (a `Symbolic` type's `kani::any()`) or its named values (`Mode = [coroutine: Coroutine, fork: Fork]`, `bool = [off: false, on: true]`): a harness per combination of values (`policy_proof::coroutine::off::proof`), each list also a wildcard-free `match` over its type.
 2. `prove`: `Symbolic` params and `kani::any()` `seccomp_data`, the assertion above.
-3. `run_bpf`: one forward pass over the program (seccomp's jumps only go forward), after the kernel's checks (`bpf_check_classic` with `check_load_and_stores`, `seccomp_check_filter`).
+3. `run_bpf`: one forward pass over the program (seccomp's jumps only go forward), after the kernel's checks (`bpf_check_classic` with its rule for scratch memory, `check_scratch_loads` here; `seccomp_check_filter`).
 
 ## Review checklist
 | Claim | Where | Verify |
 |---|---|---|
 | BPF semantics | `src/bpf.rs` `run_bpf` | the kernel's: loads from `seccomp_data`'s offsets, unsigned jumps, forward only; and `tests/kernel.rs` agrees |
-| the kernel's checks | `src/bpf.rs` `check`, `check_load_and_stores` | `bpf_check_classic`'s and `seccomp_check_filter`'s; `tests/kernel.rs` `accepts_as_linux` agrees |
+| the kernel's checks | `src/bpf.rs` `check`, `check_scratch_loads` | `bpf_check_classic`'s and `seccomp_check_filter`'s (the scratch rule from its behaviour); `tests/kernel.rs` `accepts_as_linux` agrees |
 | harness | `src/lib.rs` `prove`, `policy!` | every param `Symbolic` or listed, every field of `d` `kani::any()`, no `assume`; calls the policy as written |
 | the rule | `src/lib.rs` | nothing used comes from the compiler: `Policy`/`Filter` are blanket impls over `Fn`, `Symbolic` is sealed; the two exceptions above |
 | proof runs | the caller's `cargo kani` (`lib.kaniCheck` in the flake) | fails the build when a proof fails, or an expected harness wasn't checked |
+
+## License
+MIT or Apache-2.0, at your option (`LICENSE-MIT`, `LICENSE-APACHE`).
