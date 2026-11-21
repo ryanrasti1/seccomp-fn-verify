@@ -1,6 +1,6 @@
 //! Example policies: each construct of the subset, compiled by `seccomp_fn::compile!` (each call
 //! naming its module from the file's root: the file has a `policy` per module), each
-//! with its Kani harness (`seccomp_fn_verify::policy!`). A copy of seccomp-fn's
+//! with its Kani harness (`seccomp_fn_verify::prove!`). A copy of seccomp-fn's
 //! `examples/policies.rs` (its `tests/examples.rs`: sampled, and its proofs): here the inputs of
 //! `tests/kernel.rs`, `run_bpf` against Linux on their programs.
 
@@ -40,11 +40,15 @@ pub mod readme {
         seccomp_fn::compile!(readme::policy(pid))
     }
 
-    seccomp_fn_verify::policy!(policy, filter);
+    #[cfg(kani)]
+    mod proof {
+        use super::*;
+        seccomp_fn_verify::prove!(policy, filter);
+    }
 }
 
 /// A build-time choice of rows.
-// (not `kani::Arbitrary`: an enum param is given by its values, `policy!(…, Level = [low: Low, …])`)
+// (not `kani::Arbitrary`: an enum param is given by its values, `prove!(…, Level = [low: Low, …])`)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Level {
     Low,
@@ -85,9 +89,13 @@ pub mod compares {
     }
 
     // A harness per shape: one with the bool and the enum symbolic ran over 35 minutes.
-    seccomp_fn_verify::policy!(policy, filter, unwind = 100, (
-        _, _, bool = [loose: false, strict: true], Level = [low: Low, high: High]
-    ));
+    #[cfg(kani)]
+    mod proof {
+        use super::*;
+        seccomp_fn_verify::prove!(policy, filter, unwind = 100, (
+            _, _, bool = [loose: false, strict: true], Level = [low: Low, high: High]
+        ));
+    }
 }
 
 /// `match d.nr`, with `|` and `_`, nested in and around `if`.
@@ -125,7 +133,11 @@ pub mod table {
     }
 
     // A harness per value of the bool (with it symbolic: over 400 s).
-    seccomp_fn_verify::policy!(policy, filter, unwind = 100, (_, bool = [no_exit: false, exit: true]));
+    #[cfg(kani)]
+    mod proof {
+        use super::*;
+        seccomp_fn_verify::prove!(policy, filter, unwind = 100, (_, bool = [no_exit: false, exit: true]));
+    }
 }
 
 /// Match guards: arms in order, a guard that fails going on to the next arm, a pattern repeated,
@@ -150,7 +162,11 @@ pub mod guarded {
     }
 
     // A harness per value of the bool (with it symbolic: over 400 s).
-    seccomp_fn_verify::policy!(policy, filter, unwind = 100, (_, bool = [off: false, on: true]));
+    #[cfg(kani)]
+    mod proof {
+        use super::*;
+        seccomp_fn_verify::prove!(policy, filter, unwind = 100, (_, bool = [off: false, on: true]));
+    }
 }
 
 /// Each field's halves: `==`, `<` and `<=` on every 64-bit field against `v` (whose halves the
@@ -197,7 +213,11 @@ pub mod halves {
     }
 
     // (its program: over 100 instructions, the default bound)
-    seccomp_fn_verify::policy!(policy, filter, unwind = 160);
+    #[cfg(kani)]
+    mod proof {
+        use super::*;
+        seccomp_fn_verify::prove!(policy, filter, unwind = 160);
+    }
 }
 
 /// Another ABI and the x32 bit: KILL. Anything else: an errno.
@@ -217,7 +237,11 @@ pub mod abi {
         seccomp_fn::compile!(abi::policy())
     }
 
-    seccomp_fn_verify::policy!(policy, filter);
+    #[cfg(kani)]
+    mod proof {
+        use super::*;
+        seccomp_fn_verify::prove!(policy, filter);
+    }
 }
 
 /// Long enough that its jumps go through JA: a row per number, all to one shared verdict. No

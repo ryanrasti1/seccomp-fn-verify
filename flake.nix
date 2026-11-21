@@ -1,5 +1,5 @@
 {
-  description = "seccomp-fn-verify: the proof that a seccomp filter's program is its policy (run_bpf, policy!), and kaniCheck, its proofs as a derivation";
+  description = "seccomp-fn-verify: the proof that a seccomp filter's program is its policy (run_bpf, prove!), and kaniCheck, its proofs as a derivation";
 
   # The revision is flake.lock's.
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -71,12 +71,12 @@
           meta.description = "Kani ${version}, its bundle and toolchain";
         };
 
-      # A derivation that runs `cargo kani` on a crate's `policy!` harnesses (each policy function
+      # A derivation that runs `cargo kani` on a crate's `prove!` harnesses (each policy function
       # equal to its program, for every input and every param) and fails if any proof fails.
       # `src` is a Cargo workspace, `cargoLock` its lock file (its dependencies are vendored from
       # it: no network); each of `runs` is one `cargo kani` invocation's arguments, from `src`'s
       # root. `expectHarnesses`: every harness that must have been checked, by its full name
-      # (`policies::abi::policy_proof::policy_is_filter`); the build fails if one wasn't, and a
+      # (`policies::abi::proof::policy_is_filter`); the build fails if one wasn't, and a
       # run that checked any harness failing fails it (cargo kani's status), so each listed one
       # passed. (Without it a run that found no harness, a filter's `--harness` or a missing
       # `cfg`, passed.) An argument `--no-unwinding-assertions` is refused: with it a bound shorter

@@ -244,7 +244,7 @@ fn check(prog: &[SockFilter]) {
     assert!(last == RET_K || last == RET_A, "the last instruction isn't a return");
     // Its only refusal is at a load of scratch memory: a program without one is taken. In a
     // proof, a program with one is refused outright, more strictly than the kernel (which is
-    // sound: the proof then fails), as `compile!` emits none: the walk, even never taken (the
+    // sound: the proof then fails), as `bpf!` emits none: the walk, even never taken (the
     // solver doesn't know the program's opcodes), made each proof 4-6x slower (readme's 15 s
     // to 65-98 s). The tests run the walk, the kernel's.
     #[cfg(kani)]

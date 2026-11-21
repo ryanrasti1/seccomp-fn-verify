@@ -11,9 +11,9 @@
 //! as numbers on purpose, from the kernel's documentation: independent of the library's
 //! constants, so that a layout both the library and the macro got wrong shows here.
 
-// The example policies' programs (seccomp-fn's `compile!`: a dev-dependency, only for inputs
+// The example policies' programs (seccomp-fn's `bpf!`: a dev-dependency, only for inputs
 // here; what is checked is `run_bpf`, against the kernel). `tests/policies` is a copy of
-// seccomp-fn's `examples/policies.rs`: `compile!` reads its call's own file, so it is here.
+// seccomp-fn's `examples/policies.rs`: `bpf!` reads its call's own file, so it is here.
 mod policies;
 use policies::*;
 use seccomp_fn_verify::run_bpf;
