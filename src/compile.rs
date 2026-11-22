@@ -124,7 +124,7 @@ pub fn stat(c: &Cond) -> Option<bool> {
 pub fn stat_by(c: &Cond, s: impl Fn(&Cond) -> Option<bool>) -> Option<bool> {
     match c {
         Cond::Static(l) => Some(l.value),
-        Cond::Cmp(..) => None,
+        Cond::Cmp(..) | Cond::SCmp(..) | Cond::IsNull(..) => None,
         Cond::And(a, b) => stat_and(s(a), s(b)),
         Cond::Or(a, b) => stat_and(s(a).map(|v| !v), s(b).map(|v| !v)).map(|v| !v),
         Cond::Not(a) => s(a).map(|v| !v),
@@ -132,6 +132,7 @@ pub fn stat_by(c: &Cond, s: impl Fn(&Cond) -> Option<bool>) -> Option<bool> {
         Cond::Call { body, .. } | Cond::Apply { body, .. } => s(body),
         // every arm dead: the default's (its code is the default's); else its code loads nr
         Cond::Match(arms, default) => stat_match(arms, s(default), &s),
+        Cond::CallMatch(m) => stat_match(&m.arms, s(&m.default), &s),
     }
 }
 
@@ -322,19 +323,67 @@ pub fn t_cmp<C: Code>(
     cmp_half(kb, a, b, true, j).then(low)
 }
 
+/// The bias that maps an i32's order to a u32's: `a < b` as i32s iff `a ^ B < b ^ B` as u32s.
+pub const BIAS: u32 = 0x8000_0000;
+
+/// `a op b` of i32s (each side's low half; both high halves are refused unless 0: a 32-bit
+/// value's). cBPF's jumps are unsigned, so each side is biased (`^ BIAS`: a leaf's at build
+/// time, a computed side's by XOR) and compared unsigned. A leaf on the left only is swapped to
+/// the right, the op mirrored; Ne, Lt, Le are Eq, Ge, Gt with the exits swapped. Computed on
+/// both sides: `b` biased into `M[0]`, then `a` biased, then X = `M[0]`.
+#[allow(clippy::too_many_arguments)]
+pub fn t_scmp<C: Code>(op: CmpOp, ka: Option<u64>, kb: Option<u64>, hz: bool, a: ValGen<C>, b: ValGen<C>, t: usize, f: usize) -> C {
+    if ka.is_some() && kb.is_none() {
+        let op = match op {
+            CmpOp::Lt => CmpOp::Gt,
+            CmpOp::Le => CmpOp::Ge,
+            CmpOp::Gt => CmpOp::Lt,
+            CmpOp::Ge => CmpOp::Le,
+            o => o,
+        };
+        return t_scmp(op, kb, ka, hz, b, a, t, f);
+    }
+    let (code, t, f) = match op {
+        CmpOp::Eq => (JEQ_K, t, f),
+        CmpOp::Ne => (JEQ_K, f, t),
+        CmpOp::Gt => (JGT_K, t, f),
+        CmpOp::Ge => (JGE_K, t, f),
+        CmpOp::Lt => (JGE_K, f, t),
+        CmpOp::Le => (JGT_K, f, t),
+    };
+    let c = match kb {
+        Some(v) => a(false, 0).then(C::insn(XOR_K, 0, 0, BIAS)).then(jcond(code, v as u32 ^ BIAS, t, f)),
+        None => b(false, 0)
+            .then(C::insn(XOR_K, 0, 0, BIAS))
+            .then(C::insn(ST, 0, 0, 0))
+            .then(a(false, 1))
+            .then(C::insn(XOR_K, 0, 0, BIAS))
+            .then(C::insn(LDX_MEM, 0, 0, 0))
+            .then(jcond(code | 0x08, 0, t, f)),
+    };
+    c.refuse_if(!hz, "a signed comparison of a value that isn't 32 bits")
+}
+
+/// `p.is_null()`: `p == 0`, as [`t_cmp`]'s, all 64 bits.
+pub fn t_isnull<C: Code>(hz: bool, a: ValGen<C>, t: usize, f: usize) -> C {
+    t_cmp(CmpOp::Eq, None, Some(0), hz, a, &mut |_, _| C::empty(), t, f)
+}
+
 // ---- values ----
 
-/// `d.field`'s half: a load; a u32's high half, 0.
+/// `d.field`'s half: a load; a u32's high half, 0. A typed field's: its argument's, a u16's
+/// low half masked to 16 bits.
 pub fn t_field<C: Code>(f: Field, hi: bool) -> C {
     let (lo_off, hi_off) = match f {
         Field::Nr => (OFF_NR, OFF_NR),
         Field::Arch => (OFF_ARCH, OFF_ARCH),
         Field::Ip => OFF_IP,
-        Field::Arg(i) => off_arg(i.min(5) as usize),
+        Field::Arg(i) | Field::Typed { arg: i, .. } => off_arg(i.min(5) as usize),
     };
-    let past = matches!(f, Field::Arg(i) if i > 5);
+    let past = matches!(f, Field::Arg(i) | Field::Typed { arg: i, .. } if i > 5);
+    let u16_ = matches!(f, Field::Typed { ty: crate::calls::Ty::U16, .. });
     match (hi, f.wide()) {
-        (false, _) => C::insn(LD_W_ABS, 0, 0, lo_off),
+        (false, _) => C::insn(LD_W_ABS, 0, 0, lo_off).then(if u16_ { C::insn(AND_K, 0, 0, 0xffff) } else { C::empty() }),
         (true, true) => C::insn(LD_W_ABS, 0, 0, hi_off),
         (true, false) => C::insn(LD_W_IMM, 0, 0, 0),
     }
@@ -550,6 +599,12 @@ pub fn cond(c: &Cond, t: usize, f: usize) -> Vec<sock_filter> {
         Cond::Paren(a) | Cond::Let(_, a) | Cond::Block(a) => t_same(|t, f| cond(a, t, f), t, f),
         Cond::Call { body, .. } | Cond::Apply { body, .. } => t_same(|t, f| cond(body, t, f), t, f),
         Cond::Match(arms, default) => carms_code(arms, default, t, f),
+        Cond::SCmp(op, a, b) => {
+            t_scmp(*op, a.as_const(), b.as_const(), hi_zero(a) && hi_zero(b), &mut |h, k| val(a, h, k), &mut |h, k| val(b, h, k), t, f)
+        }
+        Cond::IsNull(a) => t_isnull(hi_zero(a), &mut |h, k| val(a, h, k), t, f),
+        // the match of its arms (`CallMatch::arm`: each pattern the variant's number)
+        Cond::CallMatch(m) => carms_code(&m.arms, &m.default, t, f),
     }
 }
 
@@ -570,6 +625,7 @@ pub fn stmt(s: &Stmt) -> Vec<sock_filter> {
         Stmt::Let(_, s) | Stmt::Block(s) => t_ssame(|| stmt(s)),
         Stmt::If(c, a, b) | Stmt::IfThen(c, a, b) => t_if(stat(c), |t, f| cond(c, t, f), || stmt(a), || stmt(b)),
         Stmt::Match(arms, default) => arms_code(arms, default),
+        Stmt::CallMatch(m) => arms_code(&m.arms, &m.default),
     }
 }
 

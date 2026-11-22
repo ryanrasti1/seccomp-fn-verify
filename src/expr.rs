@@ -10,6 +10,7 @@
 //! the print. A policy's values without `d` are leaves, so its params are too: the tree holds
 //! their values, and a proof of a node for every value of its leaves is a proof for every param.
 
+use crate::calls::Ty;
 use libc::seccomp_data;
 
 /// An expression without `d`: `value`, rustc's, of the source `src`.
@@ -30,6 +31,10 @@ pub enum Field {
     Ip,
     /// `d.args[i]`, `i` below 6
     Arg(u8),
+    /// A typed view's field: `name`, bound by an arm of `match d.call()` on `call`, argument
+    /// `arg` read as its C type `ty` (both [`crate::calls::field`]'s, which [`Field::typed`]
+    /// takes and the check confirms: never the macro's).
+    Typed { call: &'static str, name: &'static str, arg: u8, ty: Ty },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,6 +83,15 @@ pub enum Cond {
     Static(Leaf<bool>),
     /// `a op b`
     Cmp(CmpOp, Box<Val>, Box<Val>),
+    /// `a op b` of i32s: each side's low half, as an i32 (an i32 field's, a leaf's, or a closure
+    /// parameter's of type i32)
+    SCmp(CmpOp, Box<Val>, Box<Val>),
+    /// `p.is_null()`, `p` a pointer argument (a typed field of type `Ptr`)
+    IsNull(Box<Val>),
+    /// `match d.call() { Call::V { a, b, .. } if g => body, … _ => default, }`: as [`Cond::Match`]
+    /// of its arms (each pattern the variant's number, [`CallArm::new`]), the arms' patterns
+    /// beside them (`pats[i]` is `arms[i]`'s)
+    CallMatch(CallMatch<Cond>),
     /// `a && b`
     And(Box<Cond>, Box<Cond>),
     /// `a || b`
@@ -127,6 +141,8 @@ pub enum Stmt {
     IfThen(Cond, Box<Stmt>, Box<Stmt>),
     /// `match d.nr as i64 { arms… _ => default, }`
     Match(Vec<Arm<Stmt>>, Box<Stmt>),
+    /// `match d.call() { … }` (as [`Cond::CallMatch`])
+    CallMatch(CallMatch<Stmt>),
     /// `{ s }`
     Block(Box<Stmt>),
 }
@@ -137,6 +153,33 @@ pub struct Arm<B> {
     pub pats: Vec<Leaf<i64>>,
     pub guard: Option<Cond>,
     pub body: B,
+}
+
+/// `match d.call()`: its arms, each a [`Cond::Match`]'s arm whose one pattern is the variant's
+/// number, and each arm's pattern as written (`pats[i]` is `arms[i]`'s).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CallMatch<B> {
+    pub pats: Vec<CallPat>,
+    pub arms: Vec<Arm<B>>,
+    pub default: Box<B>,
+}
+
+/// An arm's pattern: `Call::call { binds…, .. }` (`rest`: with `..`; `braces`: with `{ }` at
+/// all, else a bare path).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CallPat {
+    pub call: &'static str,
+    pub binds: Vec<&'static str>,
+    pub rest: bool,
+    pub braces: bool,
+}
+
+impl<B> CallMatch<B> {
+    /// The arm for pattern `pat`: its number by the table (`None` if `call` has none).
+    pub fn arm(pat: &CallPat, guard: Option<Cond>, body: B) -> Option<Arm<B>> {
+        let nr = crate::calls::nr(pat.call)?;
+        Some(Arm { pats: vec![Leaf { value: nr, src: pat.call }], guard, body })
+    }
 }
 
 /// A policy's closure: `move |d| body`, `d` its parameter's name.
@@ -153,16 +196,44 @@ impl Field {
             Field::Arch => d.arch as u64,
             Field::Ip => d.instruction_pointer,
             Field::Arg(i) => d.args[i as usize],
+            // as `CallExt::call` reads it: truncated to the type, held zero-extended (an i32's
+            // bits as a u32's: `Cond::SCmp` compares them signed)
+            Field::Typed { arg, ty, .. } => {
+                let a = d.args[arg as usize % 6];
+                match ty {
+                    Ty::U16 => a as u16 as u64,
+                    Ty::U32 | Ty::I32 => a as u32 as u64,
+                    Ty::U64 | Ty::I64 | Ty::Usize | Ty::Ptr => a,
+                }
+            }
         }
     }
     /// The type: 64 bits, or 32 (its value's high half is 0).
     pub fn wide(self) -> bool {
-        matches!(self, Field::Ip | Field::Arg(_))
+        match self {
+            Field::Ip | Field::Arg(_) => true,
+            Field::Typed { ty, .. } => matches!(ty, Ty::U64 | Ty::I64 | Ty::Usize | Ty::Ptr),
+            Field::Nr | Field::Arch => false,
+        }
+    }
+    /// Field `name` of `call`, by the table ([`crate::calls::field`]); `None` if it has none.
+    pub fn typed(call: &'static str, name: &'static str) -> Option<Field> {
+        crate::calls::field(call, name).map(|(arg, ty)| Field::Typed { call, name, arg, ty })
     }
 }
 
 impl CmpOp {
     pub fn holds(self, a: u64, b: u64) -> bool {
+        match self {
+            CmpOp::Eq => a == b,
+            CmpOp::Ne => a != b,
+            CmpOp::Lt => a < b,
+            CmpOp::Le => a <= b,
+            CmpOp::Gt => a > b,
+            CmpOp::Ge => a >= b,
+        }
+    }
+    pub fn holds_i32(self, a: i32, b: i32) -> bool {
         match self {
             CmpOp::Eq => a == b,
             CmpOp::Ne => a != b,
@@ -235,6 +306,9 @@ impl Cond {
         match self {
             Cond::Static(l) => l.value,
             Cond::Cmp(op, a, b) => op.holds(v(a), v(b)),
+            Cond::SCmp(op, a, b) => op.holds_i32(v(a) as u32 as i32, v(b) as u32 as i32),
+            Cond::IsNull(a) => v(a) == 0,
+            Cond::CallMatch(m) => match_by(&m.arms, &m.default, d, &c, &c),
             Cond::And(a, b) => c(a) && c(b),
             Cond::Or(a, b) => c(a) || c(b),
             Cond::Not(a) => !c(a),
@@ -262,6 +336,7 @@ impl Stmt {
                 }
             }
             Stmt::Match(arms, default) => match_by(arms, default, d, &c, &s),
+            Stmt::CallMatch(m) => match_by(&m.arms, &m.default, d, &c, &s),
         }
     }
 }

@@ -39,6 +39,7 @@
 //! (`check_sampled`, and run_bpf against Linux) run the build without it.
 
 mod bpf;
+pub mod calls;
 pub mod compile;
 pub mod expr;
 pub mod print;
