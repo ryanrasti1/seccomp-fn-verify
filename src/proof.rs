@@ -117,6 +117,10 @@ impl<const N: usize> Code for Frag<N> {
     fn empty() -> Self {
         Frag::one(Seg::Skip)
     }
+    fn refuse_if(mut self, c: bool, _: &'static str) -> Self {
+        self.refused |= c;
+        self
+    }
     fn ja(n: u32) -> Self {
         Frag::one(Seg::Ja(n))
     }
@@ -397,9 +401,10 @@ fn exit() -> usize {
     any::<u16>() as usize
 }
 
-/// A depth: any slot, or one past the last (where storing is refused).
+/// A depth: any slot. (At 16, past the last, a template that stores refuses: no claim. A
+/// symbolic choice between refusing and not would merge two shapes, which Kani is slow on.)
 fn depth() -> usize {
-    any::<u8>() as usize % (MEMWORDS + 1)
+    any::<u8>() as usize % MEMWORDS
 }
 
 fn leaf<T>(value: T) -> Leaf<T> {
@@ -439,6 +444,17 @@ fn stmt_hole<const N: usize>(v: u32) -> impl FnOnce() -> Frag<N> {
 
 fn pats_hole<const N: usize>(v: bool) -> impl FnOnce(usize, usize) -> Frag<N> {
     move |t, f| Frag::hole(Hole::Pats { t, f, v }, false)
+}
+
+/// `Some(*g)`, or none, `g` not dropped (a tree's drop glue is recursive, and Kani would unwind
+/// it).
+fn keep(some: bool, g: Box<Cond>) -> Option<Cond> {
+    if some {
+        Some(*g)
+    } else {
+        forget(g);
+        None
+    }
 }
 
 /// A child's value (or stat) by which child it is (pointer): the last pair is the default.
@@ -523,38 +539,43 @@ nodes! {
     Cond::Let => { clet => for st in STATS { same_node(1, st) }; }
     Cond::Call => { call => for st in STATS { same_node(2, st) }; }
     Cond::Apply => { apply => for st in STATS { same_node(3, st) }; }
+    Cond::Block => { cblock => for st in STATS { same_node(5, st) }; }
     Cond::Match => {
         cmatch_nil => for st in STATS { same_node(4, st) };
-        carm_none_no_no => carm_node(None, St::No, St::No);
-        carm_none_no_false => carm_node(None, St::No, St::Yes(false));
-        carm_none_no_true => carm_node(None, St::No, St::Yes(true));
-        carm_none_false_no => carm_node(None, St::Yes(false), St::No);
-        carm_none_false_false => carm_node(None, St::Yes(false), St::Yes(false));
-        carm_none_false_true => carm_node(None, St::Yes(false), St::Yes(true));
-        carm_none_true_no => carm_node(None, St::Yes(true), St::No);
-        carm_none_true_false => carm_node(None, St::Yes(true), St::Yes(false));
-        carm_none_true_true => carm_node(None, St::Yes(true), St::Yes(true));
-        carm_no_no_no => carm_node(Some(St::No), St::No, St::No);
-        carm_no_no_false => carm_node(Some(St::No), St::No, St::Yes(false));
-        carm_no_no_true => carm_node(Some(St::No), St::No, St::Yes(true));
-        carm_no_false_no => carm_node(Some(St::No), St::Yes(false), St::No);
-        carm_no_false_false => carm_node(Some(St::No), St::Yes(false), St::Yes(false));
-        carm_no_false_true => carm_node(Some(St::No), St::Yes(false), St::Yes(true));
-        carm_no_true_no => carm_node(Some(St::No), St::Yes(true), St::No);
-        carm_no_true_false => carm_node(Some(St::No), St::Yes(true), St::Yes(false));
-        carm_no_true_true => carm_node(Some(St::No), St::Yes(true), St::Yes(true));
-        carm_false_no => carm_node(Some(St::Yes(false)), St::No, St::No);
-        carm_false_false => carm_node(Some(St::Yes(false)), St::No, St::Yes(false));
-        carm_false_true => carm_node(Some(St::Yes(false)), St::No, St::Yes(true));
-        carm_true_no_no => carm_node(Some(St::Yes(true)), St::No, St::No);
-        carm_true_no_false => carm_node(Some(St::Yes(true)), St::No, St::Yes(false));
-        carm_true_no_true => carm_node(Some(St::Yes(true)), St::No, St::Yes(true));
-        carm_true_false_no => carm_node(Some(St::Yes(true)), St::Yes(false), St::No);
-        carm_true_false_false => carm_node(Some(St::Yes(true)), St::Yes(false), St::Yes(false));
-        carm_true_false_true => carm_node(Some(St::Yes(true)), St::Yes(false), St::Yes(true));
-        carm_true_true_no => carm_node(Some(St::Yes(true)), St::Yes(true), St::No);
-        carm_true_true_false => carm_node(Some(St::Yes(true)), St::Yes(true), St::Yes(false));
-        carm_true_true_true => carm_node(Some(St::Yes(true)), St::Yes(true), St::Yes(true));
+        // a dead arm (no pattern an i32): its code the rest's, whatever its guard and body
+        carm_dead_no => carm_fit(false, Some(St::No), St::No, St::No);
+        carm_dead_false => carm_fit(false, Some(St::No), St::No, St::Yes(false));
+        carm_dead_true => carm_fit(false, Some(St::No), St::No, St::Yes(true));
+        carm_none_no_no => carm_fit(true, None, St::No, St::No);
+        carm_none_no_false => carm_fit(true, None, St::No, St::Yes(false));
+        carm_none_no_true => carm_fit(true, None, St::No, St::Yes(true));
+        carm_none_false_no => carm_fit(true, None, St::Yes(false), St::No);
+        carm_none_false_false => carm_fit(true, None, St::Yes(false), St::Yes(false));
+        carm_none_false_true => carm_fit(true, None, St::Yes(false), St::Yes(true));
+        carm_none_true_no => carm_fit(true, None, St::Yes(true), St::No);
+        carm_none_true_false => carm_fit(true, None, St::Yes(true), St::Yes(false));
+        carm_none_true_true => carm_fit(true, None, St::Yes(true), St::Yes(true));
+        carm_no_no_no => carm_fit(true, Some(St::No), St::No, St::No);
+        carm_no_no_false => carm_fit(true, Some(St::No), St::No, St::Yes(false));
+        carm_no_no_true => carm_fit(true, Some(St::No), St::No, St::Yes(true));
+        carm_no_false_no => carm_fit(true, Some(St::No), St::Yes(false), St::No);
+        carm_no_false_false => carm_fit(true, Some(St::No), St::Yes(false), St::Yes(false));
+        carm_no_false_true => carm_fit(true, Some(St::No), St::Yes(false), St::Yes(true));
+        carm_no_true_no => carm_fit(true, Some(St::No), St::Yes(true), St::No);
+        carm_no_true_false => carm_fit(true, Some(St::No), St::Yes(true), St::Yes(false));
+        carm_no_true_true => carm_fit(true, Some(St::No), St::Yes(true), St::Yes(true));
+        carm_false_no => carm_fit(true, Some(St::Yes(false)), St::No, St::No);
+        carm_false_false => carm_fit(true, Some(St::Yes(false)), St::No, St::Yes(false));
+        carm_false_true => carm_fit(true, Some(St::Yes(false)), St::No, St::Yes(true));
+        carm_true_no_no => carm_fit(true, Some(St::Yes(true)), St::No, St::No);
+        carm_true_no_false => carm_fit(true, Some(St::Yes(true)), St::No, St::Yes(false));
+        carm_true_no_true => carm_fit(true, Some(St::Yes(true)), St::No, St::Yes(true));
+        carm_true_false_no => carm_fit(true, Some(St::Yes(true)), St::Yes(false), St::No);
+        carm_true_false_false => carm_fit(true, Some(St::Yes(true)), St::Yes(false), St::Yes(false));
+        carm_true_false_true => carm_fit(true, Some(St::Yes(true)), St::Yes(false), St::Yes(true));
+        carm_true_true_no => carm_fit(true, Some(St::Yes(true)), St::Yes(true), St::No);
+        carm_true_true_false => carm_fit(true, Some(St::Yes(true)), St::Yes(true), St::Yes(false));
+        carm_true_true_true => carm_fit(true, Some(St::Yes(true)), St::Yes(true), St::Yes(true));
     }
     CmpOp::Eq => { cmp_eq_xx => cmp_node(CmpOp::Eq, false, false, false); cmp_eq_xk => cmp_node(CmpOp::Eq, false, true, false); cmp_eq_kx => cmp_node(CmpOp::Eq, true, false, false);
         cmp_eq_xx_32 => cmp_node(CmpOp::Eq, false, false, true); cmp_eq_xk_32 => cmp_node(CmpOp::Eq, false, true, true); cmp_eq_kx_32 => cmp_node(CmpOp::Eq, true, false, true); }
@@ -574,12 +595,119 @@ nodes! {
     Field::Ip => { field_ip_hi => field_with(Field::Ip, true); }
     Field::Arg => { field_arg => field_with(Field::Arg(any::<u8>() % 7), false); field_arg_hi => field_with(Field::Arg(any::<u8>() % 7), true); }
     Val::Const => { const_ => const_node(); }
-    Val::Bit => { bit_and_xx => bit_node(BitOp::And, false, false); bit_and_kx => bit_node(BitOp::And, true, false); bit_and_kk => bit_node(BitOp::And, true, true); }
+    Val::Bit => {
+        bit_and_kx => bit_node(BitOp::And, true, false); bit_and_kk => bit_node(BitOp::And, true, true);
+        bit_and_xx_0 => bit_at(BitOp::And, false, false, 0);
+        bit_and_xx_1 => bit_at(BitOp::And, false, false, 1);
+        bit_and_xx_2 => bit_at(BitOp::And, false, false, 2);
+        bit_and_xx_3 => bit_at(BitOp::And, false, false, 3);
+        bit_and_xx_4 => bit_at(BitOp::And, false, false, 4);
+        bit_and_xx_5 => bit_at(BitOp::And, false, false, 5);
+        bit_and_xx_6 => bit_at(BitOp::And, false, false, 6);
+        bit_and_xx_7 => bit_at(BitOp::And, false, false, 7);
+        bit_and_xx_8 => bit_at(BitOp::And, false, false, 8);
+        bit_and_xx_9 => bit_at(BitOp::And, false, false, 9);
+        bit_and_xx_10 => bit_at(BitOp::And, false, false, 10);
+        bit_and_xx_11 => bit_at(BitOp::And, false, false, 11);
+        bit_and_xx_12 => bit_at(BitOp::And, false, false, 12);
+        bit_and_xx_13 => bit_at(BitOp::And, false, false, 13);
+        bit_and_xx_14 => bit_at(BitOp::And, false, false, 14);
+        bit_and_xx_15 => bit_at(BitOp::And, false, false, 15);
+    }
     BitOp::And => { bit_and_xk => bit_node(BitOp::And, false, true); }
-    BitOp::Or => { bit_or_xx => bit_node(BitOp::Or, false, false); bit_or_xk => bit_node(BitOp::Or, false, true); bit_or_kx => bit_node(BitOp::Or, true, false); bit_or_kk => bit_node(BitOp::Or, true, true); }
-    Val::Shift => { shift_shl_32 => shift_node(ShiftOp::Shl, false); shift_shr_32 => shift_node(ShiftOp::Shr, false); }
-    ShiftOp::Shl => { shift_shl_lo => shift_node(ShiftOp::Shl, true); }
-    ShiftOp::Shr => { shift_shr_lo => shift_node(ShiftOp::Shr, true); }
+    BitOp::Or => {
+        bit_or_xk => bit_node(BitOp::Or, false, true); bit_or_kx => bit_node(BitOp::Or, true, false); bit_or_kk => bit_node(BitOp::Or, true, true);
+        bit_or_xx_0 => bit_at(BitOp::Or, false, false, 0);
+        bit_or_xx_1 => bit_at(BitOp::Or, false, false, 1);
+        bit_or_xx_2 => bit_at(BitOp::Or, false, false, 2);
+        bit_or_xx_3 => bit_at(BitOp::Or, false, false, 3);
+        bit_or_xx_4 => bit_at(BitOp::Or, false, false, 4);
+        bit_or_xx_5 => bit_at(BitOp::Or, false, false, 5);
+        bit_or_xx_6 => bit_at(BitOp::Or, false, false, 6);
+        bit_or_xx_7 => bit_at(BitOp::Or, false, false, 7);
+        bit_or_xx_8 => bit_at(BitOp::Or, false, false, 8);
+        bit_or_xx_9 => bit_at(BitOp::Or, false, false, 9);
+        bit_or_xx_10 => bit_at(BitOp::Or, false, false, 10);
+        bit_or_xx_11 => bit_at(BitOp::Or, false, false, 11);
+        bit_or_xx_12 => bit_at(BitOp::Or, false, false, 12);
+        bit_or_xx_13 => bit_at(BitOp::Or, false, false, 13);
+        bit_or_xx_14 => bit_at(BitOp::Or, false, false, 14);
+        bit_or_xx_15 => bit_at(BitOp::Or, false, false, 15);
+    }
+    // a u32's and a u64's, each half; a u64's `Mixed` half (through `M[k]`) a harness per depth
+    Val::Shift => { shl32_lo => shift_node(ShiftOp::Shl, false, false, None); shl32_hi => shift_node(ShiftOp::Shl, false, true, None); shr32_lo => shift_node(ShiftOp::Shr, false, false, None); shr32_hi => shift_node(ShiftOp::Shr, false, true, None); }
+    ShiftOp::Shl => {
+        shl_lo => shift_node(ShiftOp::Shl, true, false, None);
+        shl_hi => shift_node(ShiftOp::Shl, true, true, None);
+        shl_lo_mixed_0 => shift_node(ShiftOp::Shl, true, false, Some(0));
+        shl_lo_mixed_1 => shift_node(ShiftOp::Shl, true, false, Some(1));
+        shl_lo_mixed_2 => shift_node(ShiftOp::Shl, true, false, Some(2));
+        shl_lo_mixed_3 => shift_node(ShiftOp::Shl, true, false, Some(3));
+        shl_lo_mixed_4 => shift_node(ShiftOp::Shl, true, false, Some(4));
+        shl_lo_mixed_5 => shift_node(ShiftOp::Shl, true, false, Some(5));
+        shl_lo_mixed_6 => shift_node(ShiftOp::Shl, true, false, Some(6));
+        shl_lo_mixed_7 => shift_node(ShiftOp::Shl, true, false, Some(7));
+        shl_lo_mixed_8 => shift_node(ShiftOp::Shl, true, false, Some(8));
+        shl_lo_mixed_9 => shift_node(ShiftOp::Shl, true, false, Some(9));
+        shl_lo_mixed_10 => shift_node(ShiftOp::Shl, true, false, Some(10));
+        shl_lo_mixed_11 => shift_node(ShiftOp::Shl, true, false, Some(11));
+        shl_lo_mixed_12 => shift_node(ShiftOp::Shl, true, false, Some(12));
+        shl_lo_mixed_13 => shift_node(ShiftOp::Shl, true, false, Some(13));
+        shl_lo_mixed_14 => shift_node(ShiftOp::Shl, true, false, Some(14));
+        shl_lo_mixed_15 => shift_node(ShiftOp::Shl, true, false, Some(15));
+        shl_hi_mixed_0 => shift_node(ShiftOp::Shl, true, true, Some(0));
+        shl_hi_mixed_1 => shift_node(ShiftOp::Shl, true, true, Some(1));
+        shl_hi_mixed_2 => shift_node(ShiftOp::Shl, true, true, Some(2));
+        shl_hi_mixed_3 => shift_node(ShiftOp::Shl, true, true, Some(3));
+        shl_hi_mixed_4 => shift_node(ShiftOp::Shl, true, true, Some(4));
+        shl_hi_mixed_5 => shift_node(ShiftOp::Shl, true, true, Some(5));
+        shl_hi_mixed_6 => shift_node(ShiftOp::Shl, true, true, Some(6));
+        shl_hi_mixed_7 => shift_node(ShiftOp::Shl, true, true, Some(7));
+        shl_hi_mixed_8 => shift_node(ShiftOp::Shl, true, true, Some(8));
+        shl_hi_mixed_9 => shift_node(ShiftOp::Shl, true, true, Some(9));
+        shl_hi_mixed_10 => shift_node(ShiftOp::Shl, true, true, Some(10));
+        shl_hi_mixed_11 => shift_node(ShiftOp::Shl, true, true, Some(11));
+        shl_hi_mixed_12 => shift_node(ShiftOp::Shl, true, true, Some(12));
+        shl_hi_mixed_13 => shift_node(ShiftOp::Shl, true, true, Some(13));
+        shl_hi_mixed_14 => shift_node(ShiftOp::Shl, true, true, Some(14));
+        shl_hi_mixed_15 => shift_node(ShiftOp::Shl, true, true, Some(15));
+    }
+    ShiftOp::Shr => {
+        shr_lo => shift_node(ShiftOp::Shr, true, false, None);
+        shr_hi => shift_node(ShiftOp::Shr, true, true, None);
+        shr_lo_mixed_0 => shift_node(ShiftOp::Shr, true, false, Some(0));
+        shr_lo_mixed_1 => shift_node(ShiftOp::Shr, true, false, Some(1));
+        shr_lo_mixed_2 => shift_node(ShiftOp::Shr, true, false, Some(2));
+        shr_lo_mixed_3 => shift_node(ShiftOp::Shr, true, false, Some(3));
+        shr_lo_mixed_4 => shift_node(ShiftOp::Shr, true, false, Some(4));
+        shr_lo_mixed_5 => shift_node(ShiftOp::Shr, true, false, Some(5));
+        shr_lo_mixed_6 => shift_node(ShiftOp::Shr, true, false, Some(6));
+        shr_lo_mixed_7 => shift_node(ShiftOp::Shr, true, false, Some(7));
+        shr_lo_mixed_8 => shift_node(ShiftOp::Shr, true, false, Some(8));
+        shr_lo_mixed_9 => shift_node(ShiftOp::Shr, true, false, Some(9));
+        shr_lo_mixed_10 => shift_node(ShiftOp::Shr, true, false, Some(10));
+        shr_lo_mixed_11 => shift_node(ShiftOp::Shr, true, false, Some(11));
+        shr_lo_mixed_12 => shift_node(ShiftOp::Shr, true, false, Some(12));
+        shr_lo_mixed_13 => shift_node(ShiftOp::Shr, true, false, Some(13));
+        shr_lo_mixed_14 => shift_node(ShiftOp::Shr, true, false, Some(14));
+        shr_lo_mixed_15 => shift_node(ShiftOp::Shr, true, false, Some(15));
+        shr_hi_mixed_0 => shift_node(ShiftOp::Shr, true, true, Some(0));
+        shr_hi_mixed_1 => shift_node(ShiftOp::Shr, true, true, Some(1));
+        shr_hi_mixed_2 => shift_node(ShiftOp::Shr, true, true, Some(2));
+        shr_hi_mixed_3 => shift_node(ShiftOp::Shr, true, true, Some(3));
+        shr_hi_mixed_4 => shift_node(ShiftOp::Shr, true, true, Some(4));
+        shr_hi_mixed_5 => shift_node(ShiftOp::Shr, true, true, Some(5));
+        shr_hi_mixed_6 => shift_node(ShiftOp::Shr, true, true, Some(6));
+        shr_hi_mixed_7 => shift_node(ShiftOp::Shr, true, true, Some(7));
+        shr_hi_mixed_8 => shift_node(ShiftOp::Shr, true, true, Some(8));
+        shr_hi_mixed_9 => shift_node(ShiftOp::Shr, true, true, Some(9));
+        shr_hi_mixed_10 => shift_node(ShiftOp::Shr, true, true, Some(10));
+        shr_hi_mixed_11 => shift_node(ShiftOp::Shr, true, true, Some(11));
+        shr_hi_mixed_12 => shift_node(ShiftOp::Shr, true, true, Some(12));
+        shr_hi_mixed_13 => shift_node(ShiftOp::Shr, true, true, Some(13));
+        shr_hi_mixed_14 => shift_node(ShiftOp::Shr, true, true, Some(14));
+        shr_hi_mixed_15 => shift_node(ShiftOp::Shr, true, true, Some(15));
+    }
     Val::Paren => { vparen => vparen_node(); }
     Val::Param => { param => param_node(); }
     Stmt::Verdict => { verdict => ret_node(false); }
@@ -590,10 +718,11 @@ nodes! {
     Stmt::IfThen => { if_then => for st in STATS { if_node(true, st) }; }
     Stmt::Match => {
         smatch_nil => ssame_node(2);
-        arm_none => arm_node(None);
-        arm_no => arm_node(Some(St::No));
-        arm_false => arm_node(Some(St::Yes(false)));
-        arm_true => arm_node(Some(St::Yes(true)));
+        arm_dead => arm_fit(false, Some(St::No));
+        arm_none => arm_fit(true, None);
+        arm_no => arm_fit(true, Some(St::No));
+        arm_false => arm_fit(true, Some(St::Yes(false)));
+        arm_true => arm_fit(true, Some(St::Yes(true)));
     }
 }
 
@@ -658,7 +787,8 @@ fn not_node(st: St) {
     forget(node);
 }
 
-/// A node whose code is its one child's: `(a)`, `let …; a`, `f(d, …)`, `g(x)`, `match` of no arm.
+/// A node whose code is its one child's: `(a)`, `let …; a`, `f(d, …)`, `g(x)`, `{ a }`, `match`
+/// of no arm.
 fn same_node(kind: u8, st: St) {
     let (t, f, d) = (exit(), exit(), data());
     let (a, v, s, h) = cond_child::<1>(st);
@@ -667,6 +797,7 @@ fn same_node(kind: u8, st: St) {
         1 => Cond::Let(Let::Plain(""), a),
         2 => Cond::Call { name: "", args: vec![], d: "", body: a },
         3 => Cond::Apply { name: "", args: vec![], body: a },
+        5 => Cond::Block(a),
         _ => Cond::Match(vec![], a),
     };
     cond_contract(t_same(h, t, f), &d, stat_by(&node, |_| s), node.eval_by(&d, |_| v, |_| 0), t, f);
@@ -678,12 +809,6 @@ fn same_node(kind: u8, st: St) {
 /// (the default, standing for the arms after it: their `match`'s stat and value). The node's
 /// lines are `stat_match` and `match_by` (`Cond::Match`'s), on the arms in a stack array: Kani
 /// loses a `Vec`'s length once it is inside another on the heap.
-fn carm_node(guard: Option<St>, sb: St, sr: St) {
-    for fit in [false, true] {
-        carm_fit(fit, guard, sb, sr)
-    }
-}
-
 /// A pattern that is an i32 (`fit`) or isn't: every value of either kind (`x ^ 1 << 40` maps
 /// every i32 to one that isn't). `fit` a constant: the template branches on it, and one shape
 /// per call keeps the proof fast.
@@ -700,7 +825,7 @@ fn carm_fit(fit: bool, guard: Option<St>, sb: St, sr: St) {
     let (b, vb, sb, hb) = cond_child::<6>(sb);
     let (r, vr, sr, hr) = cond_child::<6>(sr);
     // (no drop: a tree's drop glue is recursive, and Kani would unwind it)
-    let arms = ManuallyDrop::new([Arm { pats: vec![leaf(p)], guard: guard.map(|_| *g), body: *b }]);
+    let arms = ManuallyDrop::new([Arm { pats: vec![leaf(p)], guard: keep(guard.is_some(), g), body: *b }]);
     let r = ManuallyDrop::new(r);
     let none = Cond::Static(leaf(true));
     let a = &arms[0];
@@ -709,7 +834,7 @@ fn carm_fit(fit: bool, guard: Option<St>, sb: St, sr: St) {
     let stat = stat_match(&*arms, s(&r), &s);
     let c = by([(gp, vg), (&a.body, vb), (&**r, vr)]);
     let eval = match_by(&*arms, &**r, &d, &c, &c);
-    let code = t_carm(fit, sg, sb, pats_hole(member(&a.pats, &d)), hg, hb, hr, t, f);
+    let code = t_carm(fit, sg, sb, sr, pats_hole(member(&a.pats, &d)), hg, hb, hr, t, f);
     cond_contract(code, &d, stat, eval, t, f);
 }
 
@@ -729,42 +854,66 @@ fn cmp_node(op: CmpOp, la: bool, lb: bool, hz: bool) {
 fn field_with(field: Field, hi: bool) {
     let (k, d) = (depth(), data());
     let node = Val::Field(field);
-    val_contract(t_field::<Frag<1>>(field, hi), &d, || node.eval_by(&d, |_| 0), hi, k);
+    val_contract(t_field::<Frag<1>>(field, hi), &d, || node.eval_by(&d, |_| 0, |_| true), hi, k);
 }
 
 fn const_node() {
     let (v, hi, k, d) = (any::<u64>(), any::<bool>(), depth(), data());
     let node = Val::Const(leaf(v));
-    val_contract(t_const::<Frag<1>>(v, hi), &d, || node.eval_by(&d, |_| 0), hi, k);
+    val_contract(t_const::<Frag<1>>(v, hi), &d, || node.eval_by(&d, |_| 0, |_| true), hi, k);
 }
 
+/// `a & b`, `a | b`, each side a leaf or computed, at any depth (computed on both sides,
+/// through `M[k]`: a harness per depth, `bit_at`: a store and a load at a symbolic slot cost the
+/// solver 10x).
 fn bit_node(op: BitOp, la: bool, lb: bool) {
-    for hi in [false, true] {
-        let (va, vb, k, d) = (any::<u64>(), any::<u64>(), depth(), data());
-        let node = Val::Bit(op, Box::new(Val::Const(leaf(va))), Box::new(Val::Const(leaf(vb))));
-        let Val::Bit(_, a, b) = &node else { unreachable!() };
-        let code = t_bit::<Frag<5>>(op, la.then_some(va), lb.then_some(vb), &mut val_hole(va), &mut val_hole(vb), hi, k);
-        val_contract(code, &d, || node.eval_by(&d, by([(&**a, va), (&**b, vb)])), hi, k);
-        forget(node);
-    }
+    bit_at(op, la, lb, depth())
 }
 
-/// `a << s`, `a >> s`: `a` a u64 (a leaf's placeholder) or a u32 (`d.arch`'s), `s` any.
-fn shift_node(op: ShiftOp, wide: bool) {
-    for hi in [false, true] {
-        let (va, s, k, d) = (any::<u64>(), any::<u32>(), depth(), data());
-        let a = Box::new(if wide { Val::Const(leaf(va)) } else { Val::Field(Field::Arch) });
-        let node = Val::Shift(op, a, leaf(s));
-        let code = t_shift::<Frag<7>>(op, wide, s, &mut val_hole(va), hi, k);
-        val_contract(code, &d, || node.eval_by(&d, |_| va), hi, k);
-        forget(node);
+fn bit_at(op: BitOp, la: bool, lb: bool, k: usize) {
+    let (va, vb, hi, d) = (any::<u64>(), any::<u64>(), any::<bool>(), data());
+    let node = Val::Bit(op, Box::new(Val::Const(leaf(va))), Box::new(Val::Const(leaf(vb))));
+    let Val::Bit(_, a, b) = &node else { unreachable!() };
+    let code = t_bit::<Frag<5>>(op, la.then_some(va), lb.then_some(vb), &mut val_hole(va), &mut val_hole(vb), hi, k);
+    val_contract(code, &d, || node.eval_by(&d, by([(&**a, va), (&**b, vb)]), |_| true), hi, k);
+    forget(node);
+}
+
+/// `a << s`, `a >> s`: `a` a u64 (a leaf's placeholder) or a u32 (`d.arch`'s), `s` any, the
+/// half `hi`. `t_shift` is `t_shift_case` of `shift_case`: each case's code is checked in its
+/// own arm, the case's opcodes (asserted) as constants (one shape each: Kani merging the cases'
+/// fragments took 99 s).
+fn shift_node(op: ShiftOp, wide: bool, hi: bool, at: Option<usize>) {
+    let (sh, back) = if op == ShiftOp::Shl { (LSH_K, RSH_K) } else { (RSH_K, LSH_K) };
+    // `Mixed` stores at `M[k]`: a harness per depth (`at`); every other case at any depth
+    let k = at.unwrap_or_else(depth);
+    let (va, s, d) = (any::<u64>(), any::<u32>(), data());
+    let a = Box::new(if wide { Val::Const(leaf(va)) } else { Val::Field(Field::Arch) });
+    let node = ManuallyDrop::new(Val::Shift(op, a, leaf(s)));
+    let eval = || node.eval_by(&d, |_| va, |_| wide);
+    let a = &mut val_hole(va);
+    match (shift_case(op, wide, s, hi), at) {
+        (ShiftCase::Mixed(h, b, o, x), Some(_)) => {
+            assert!(b == back && o == sh);
+            val_contract(t_shift_case::<Frag<7>>(ShiftCase::Mixed(h, back, sh, x), a, k), &d, eval, hi, k)
+        }
+        (_, Some(_)) => {}
+        (ShiftCase::Refused, None) => assert!(t_shift_case::<Frag<7>>(ShiftCase::Refused, a, k).refused),
+        (ShiftCase::Zero, None) => val_contract(t_shift_case::<Frag<7>>(ShiftCase::Zero, a, k), &d, eval, hi, k),
+        (ShiftCase::Copy(h), None) => val_contract(t_shift_case::<Frag<7>>(ShiftCase::Copy(h), a, k), &d, eval, hi, k),
+        (ShiftCase::Shifted(h, o, b), None) => {
+            assert!(o == sh);
+            val_contract(t_shift_case::<Frag<7>>(ShiftCase::Shifted(h, sh, b), a, k), &d, eval, hi, k)
+        }
+        // each depth's harness
+        (ShiftCase::Mixed(..), None) => {}
     }
 }
 
 fn vparen_node() {
     let (va, hi, k, d) = (any::<u64>(), any::<bool>(), depth(), data());
     let node = Val::Paren(Box::new(Val::Const(leaf(va))));
-    val_contract(t_vsame::<Frag<1>>(&mut val_hole(va), hi, k), &d, || node.eval_by(&d, |_| va), hi, k);
+    val_contract(t_vsame::<Frag<1>>(&mut val_hole(va), hi, k), &d, || node.eval_by(&d, |_| va, |_| true), hi, k);
     forget(node);
 }
 
@@ -804,17 +953,11 @@ fn if_node(then: bool, sc: St) {
 }
 
 /// A statement arm (as `carm_node`), then the rest (the default, standing for the arms after).
-fn arm_node(guard: Option<St>) {
-    for fit in [false, true] {
-        arm_fit(fit, guard)
-    }
-}
-
 fn arm_fit(fit: bool, guard: Option<St>) {
     let (p, d) = (pat(fit), data());
     let (g, vg, sg, hg) = cond_child::<6>(guard.unwrap_or(St::Yes(true)));
     let (vb, vr): (u32, u32) = (any(), any());
-    let arms = ManuallyDrop::new([Arm { pats: vec![leaf(p)], guard: guard.map(|_| *g), body: Stmt::Verdict(leaf(vb)) }]);
+    let arms = ManuallyDrop::new([Arm { pats: vec![leaf(p)], guard: keep(guard.is_some(), g), body: Stmt::Verdict(leaf(vb)) }]);
     let r = Stmt::Verdict(leaf(vr));
     let a = &arms[0];
     let eval = match_by(&*arms, &r, &d, &|_: &Cond| vg, &by([(&a.body, vb), (&r, vr)]));

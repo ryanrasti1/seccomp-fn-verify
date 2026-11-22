@@ -46,6 +46,9 @@ pub trait Code: Sized {
     fn cmp_half(kb: Option<u64>, a: ValGen<Self>, b: ValGen<Self>, hi: bool, j: Jumps) -> Self {
         cmp_half_insns(kb, a, b, hi, j)
     }
+    /// `self`, refused (`why`) if `c`: a refusal of code already built, so that a proof's
+    /// fragment keeps one shape either way.
+    fn refuse_if(self, c: bool, why: &'static str) -> Self;
     /// `self` then `next`
     fn then(self, next: Self) -> Self;
 }
@@ -66,6 +69,12 @@ impl Code for Vec<sock_filter> {
     fn insn(code: u16, jt: u8, jf: u8, k: u32) -> Self {
         vec![sock_filter { code, jt, jf, k }]
     }
+    fn refuse_if(self, c: bool, why: &'static str) -> Self {
+        if c {
+            panic!("seccomp_fn_verify::compile: {why}")
+        }
+        self
+    }
     fn then(mut self, mut next: Self) -> Self {
         self.append(&mut next);
         self
@@ -80,10 +89,7 @@ fn far(n: usize) -> Option<u32> {
 
 /// To `n` instructions past the end: nothing if `n` is 0, else a JA.
 pub fn jump<C: Code>(n: usize) -> C {
-    match far(n) {
-        Some(k) => C::ja(k),
-        None => C::refuse("a program longer than the kernel's limit"),
-    }
+    C::ja(far(n).unwrap_or(0)).refuse_if(far(n).is_none(), "a program longer than the kernel's limit")
 }
 
 /// A conditional jump `code` (JEQ, JGT, JGE; by K or X) to `t` if it holds, else `f` (past the
@@ -122,17 +128,16 @@ pub fn stat_by(c: &Cond, s: impl Fn(&Cond) -> Option<bool>) -> Option<bool> {
         Cond::And(a, b) => stat_and(s(a), s(b)),
         Cond::Or(a, b) => stat_and(s(a).map(|v| !v), s(b).map(|v| !v)).map(|v| !v),
         Cond::Not(a) => s(a).map(|v| !v),
-        Cond::Paren(a) | Cond::Let(_, a) => s(a),
+        Cond::Paren(a) | Cond::Let(_, a) | Cond::Block(a) => s(a),
         Cond::Call { body, .. } | Cond::Apply { body, .. } => s(body),
         // every arm dead: the default's (its code is the default's); else its code loads nr
         Cond::Match(arms, default) => stat_match(arms, s(default), &s),
     }
 }
 
-/// A `match` of conditions, its default's stat given: every arm dead, the default's (its code
-/// is the default's); else undecided (its code loads nr).
-pub fn stat_match<B>(arms: &[Arm<B>], default: Option<bool>, s: impl Fn(&Cond) -> Option<bool>) -> Option<bool> {
-    stat_arm(arms.iter().all(|a| dead(a, &s)), default)
+/// A `match` of conditions, its default's stat given: each arm then the rest, from the last.
+pub fn stat_match(arms: &[Arm<Cond>], default: Option<bool>, s: impl Fn(&Cond) -> Option<bool>) -> Option<bool> {
+    arms.iter().rev().fold(default, |rest, a| stat_arm(dead(a, &s), s(&a.body), rest))
 }
 
 /// A `match` arm that can't match: no pattern is an i32, or its guard is decided false.
@@ -140,9 +145,10 @@ pub fn dead<B>(a: &Arm<B>, s: impl Fn(&Cond) -> Option<bool>) -> bool {
     !a.pats.iter().any(|p| fits(p.value)) || a.guard.as_ref().and_then(s) == Some(false)
 }
 
-/// An arm then the rest (of conditions): decided if the arm is dead and the rest decided.
-pub fn stat_arm(dead: bool, rest: Option<bool>) -> Option<bool> {
-    if dead { rest } else { None }
+/// An arm then the rest (of conditions): the rest's if the arm is dead, or its body decided the
+/// rest's value (either way the value is the rest's, and the code the rest's); else undecided.
+pub fn stat_arm(dead: bool, body: Option<bool>, rest: Option<bool>) -> Option<bool> {
+    if dead || (body.is_some() && body == rest) { rest } else { None }
 }
 
 pub fn stat_and(a: Option<bool>, b: Option<bool>) -> Option<bool> {
@@ -239,13 +245,10 @@ pub fn operands<C: Code>(kb: Option<u64>, a: ValGen<C>, b: ValGen<C>, hi: bool, 
     match kb {
         Some(v) => (a(hi, k), 0, if hi { (v >> 32) as u32 } else { v as u32 }),
         None => {
-            if k >= MEMWORDS {
-                return (C::refuse("a value nested past the scratch memory's 16 slots"), 0, 0);
-            }
             let cb = b(hi, k);
             let ca = a(hi, k + 1);
             let c = cb.then(C::insn(ST, 0, 0, k as u32)).then(ca).then(C::insn(LDX_MEM, 0, 0, k as u32));
-            (c, 0x08, 0) // BPF_X
+            (c.refuse_if(k >= MEMWORDS, "a value nested past the scratch memory's 16 slots"), 0x08, 0) // BPF_X
         }
     }
 }
@@ -327,14 +330,15 @@ pub fn t_field<C: Code>(f: Field, hi: bool) -> C {
         Field::Nr => (OFF_NR, OFF_NR),
         Field::Arch => (OFF_ARCH, OFF_ARCH),
         Field::Ip => OFF_IP,
-        Field::Arg(i) if i < 6 => off_arg(i as usize),
-        Field::Arg(_) => return C::refuse("d.args[i] with i past 5"),
+        Field::Arg(i) => off_arg(i.min(5) as usize),
     };
+    let past = matches!(f, Field::Arg(i) if i > 5);
     match (hi, f.wide()) {
         (false, _) => C::insn(LD_W_ABS, 0, 0, lo_off),
         (true, true) => C::insn(LD_W_ABS, 0, 0, hi_off),
         (true, false) => C::insn(LD_W_IMM, 0, 0, 0),
     }
+    .refuse_if(past, "d.args[i] with i past 5")
 }
 
 /// A leaf's half: an immediate.
@@ -362,43 +366,64 @@ pub fn t_vsame<C: Code>(a: ValGen<C>, hi: bool, k: usize) -> C {
 }
 
 /// `a << s`, `a >> s`, `s` a leaf below the width (Rust panics past it: refused). `wide`: `a`
-/// is a u64 (else a u32: its low half alone, the high half 0). A u64's half shifted in from the
-/// other half is or-ed in through `M[k]`.
+/// is a u64 (else a u32: its low half alone, the high half 0). The half's code by its case
+/// ([`shift_case`], [`t_shift_case`]).
 pub fn t_shift<C: Code>(op: ShiftOp, wide: bool, s: u32, a: ValGen<C>, hi: bool, k: usize) -> C {
+    t_shift_case(shift_case(op, wide, s, hi), a, k)
+}
+
+/// A shift's half, by case: refused; 0; one of `a`'s halves as it is (`Copy`), or shifted by an
+/// op and an amount (`Shifted`); or (`Mixed`) the other half's bits moved in (by `back`, `32 -
+/// s`) or-ed with this half's own shifted (by `sh`, `s`), through `M[k]`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ShiftCase {
+    Refused,
+    Zero,
+    Copy(bool),
+    Shifted(bool, u16, u32),
+    Mixed(bool, u16, u16, u32),
+}
+
+/// The case of the half `hi` of `a op s`.
+pub fn shift_case(op: ShiftOp, wide: bool, s: u32, hi: bool) -> ShiftCase {
     let shl = op == ShiftOp::Shl;
     let (sh, back) = if shl { (LSH_K, RSH_K) } else { (RSH_K, LSH_K) };
     if !wide {
         return match (s < 32, hi) {
-            (false, _) => C::refuse("a shift of a u32 by 32 or more"),
-            (true, false) => a(false, k).then(C::insn(sh, 0, 0, s)),
-            (true, true) => C::insn(LD_W_IMM, 0, 0, 0),
+            (false, _) => ShiftCase::Refused,
+            (true, false) => ShiftCase::Shifted(false, sh, s),
+            (true, true) => ShiftCase::Zero,
         };
     }
     if s >= 64 {
-        return C::refuse("a shift of a u64 by 64 or more");
+        return ShiftCase::Refused;
     }
     // the half the bits move toward (Shl: the high one), or the one they leave
-    let toward = hi == shl;
-    match (toward, s) {
-        // the half they leave: shifted, or (by 32 or more) 0
-        (false, s) if s < 32 => a(hi, k).then(C::insn(sh, 0, 0, s)),
-        (false, _) => C::insn(LD_W_IMM, 0, 0, 0),
-        (true, 0) => a(hi, k),
-        (true, s) if s < 32 => {
-            if k >= MEMWORDS {
-                return C::refuse("a value nested past the scratch memory's 16 slots");
-            }
-            // the other half's bits moving in, then this half's own, or-ed
-            a(!hi, k)
-                .then(C::insn(back, 0, 0, 32 - s))
-                .then(C::insn(ST, 0, 0, k as u32))
-                .then(a(hi, k + 1))
-                .then(C::insn(sh, 0, 0, s))
-                .then(C::insn(LDX_MEM, 0, 0, k as u32))
-                .then(C::insn(OR_X, 0, 0, 0))
-        }
+    match (hi == shl, s) {
+        (false, s) if s < 32 => ShiftCase::Shifted(hi, sh, s),
+        (false, _) => ShiftCase::Zero,
+        (true, 0) => ShiftCase::Copy(hi),
+        (true, s) if s < 32 => ShiftCase::Mixed(hi, back, sh, s),
         // by 32 or more: the other half's, shifted by the rest
-        (true, s) => a(!hi, k).then(C::insn(sh, 0, 0, s - 32)),
+        (true, s) => ShiftCase::Shifted(!hi, sh, s - 32),
+    }
+}
+
+/// A shift case's code.
+pub fn t_shift_case<C: Code>(c: ShiftCase, a: ValGen<C>, k: usize) -> C {
+    match c {
+        ShiftCase::Refused => C::refuse("a shift by its type's width or more"),
+        ShiftCase::Zero => C::insn(LD_W_IMM, 0, 0, 0),
+        ShiftCase::Copy(h) => a(h, k),
+        ShiftCase::Shifted(h, op, by) => a(h, k).then(C::insn(op, 0, 0, by)),
+        ShiftCase::Mixed(h, back, sh, s) => a(!h, k)
+            .then(C::insn(back, 0, 0, 32 - s))
+            .then(C::insn(ST, 0, 0, k as u32))
+            .then(a(h, k + 1))
+            .then(C::insn(sh, 0, 0, s))
+            .then(C::insn(LDX_MEM, 0, 0, k as u32))
+            .then(C::insn(OR_X, 0, 0, 0))
+            .refuse_if(k >= MEMWORDS, "a value nested past the scratch memory's 16 slots"),
     }
 }
 
@@ -459,12 +484,14 @@ pub fn t_arm<C: Code>(
 
 /// A `match` arm of conditions then the arms after it (`rest`), to `t` or `f`: as
 /// [`t_arm`], the body's exits past the rest. A body decided when the program is built (`sb`,
-/// `true` the common one) is no code: the guard's (or the patterns') exit is the body's.
+/// `true` the common one) is no code: the guard's (or the patterns') exit is the body's; decided
+/// the rest's value (`sr`, the rest's stat), the arm is the rest's code.
 #[allow(clippy::too_many_arguments)]
 pub fn t_carm<C: Code>(
     fit: bool,
     sg: Option<bool>,
     sb: Option<bool>,
+    sr: Option<bool>,
     pats: impl FnOnce(usize, usize) -> C,
     guard: impl FnOnce(usize, usize) -> C,
     body: impl FnOnce(usize, usize) -> C,
@@ -473,7 +500,8 @@ pub fn t_carm<C: Code>(
     f: usize,
 ) -> C {
     let cr = rest(t, f);
-    if !fit || sg == Some(false) {
+    // dead, or the body decided the rest's value: the rest's code (`stat_arm`)
+    if !fit || sg == Some(false) || (sb.is_some() && sb == sr) {
         return cr;
     }
     let r = cr.len();
@@ -519,7 +547,7 @@ pub fn cond(c: &Cond, t: usize, f: usize) -> Vec<sock_filter> {
         Cond::And(a, b) => t_and(stat(a), stat(b), |t, f| cond(a, t, f), |t, f| cond(b, t, f), t, f),
         Cond::Or(a, b) => t_or(stat(a), stat(b), |t, f| cond(a, t, f), |t, f| cond(b, t, f), t, f),
         Cond::Not(a) => t_not(|t, f| cond(a, t, f), t, f),
-        Cond::Paren(a) | Cond::Let(_, a) => t_same(|t, f| cond(a, t, f), t, f),
+        Cond::Paren(a) | Cond::Let(_, a) | Cond::Block(a) => t_same(|t, f| cond(a, t, f), t, f),
         Cond::Call { body, .. } | Cond::Apply { body, .. } => t_same(|t, f| cond(body, t, f), t, f),
         Cond::Match(arms, default) => carms_code(arms, default, t, f),
     }
@@ -565,6 +593,7 @@ fn carms_code(arms: &[Arm<Cond>], default: &Cond, t: usize, f: usize) -> Vec<soc
         a.pats.iter().any(|p| fits(p.value)),
         sg,
         stat(&a.body),
+        stat_match(rest, stat(default), stat),
         |t, f| pats(&a.pats, t, f),
         |t, f| cond(a.guard.as_ref().expect("a guard: t_carm calls this only if sg isn't Some(true)"), t, f),
         |t, f| cond(&a.body, t, f),

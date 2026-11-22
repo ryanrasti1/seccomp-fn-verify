@@ -50,7 +50,8 @@ pub fn leaf_prec(src: &str) -> u8 {
     let low = |p: &mut u8, q: u8| *p = (*p).min(q);
     while i < b.len() {
         let (c, next) = (b[i], b.get(i + 1).copied().unwrap_or(b' '));
-        let prev = if i > 0 { b[i - 1] } else { b' ' };
+        // the char before, past spaces (`m ! ()`, a macro, as proc_macro2 prints it)
+        let prev = b[..i].iter().rev().copied().find(|c| *c != b' ').unwrap_or(b' ');
         match c {
             b'(' | b'[' | b'{' => depth += 1,
             b')' | b']' | b'}' => {
@@ -166,9 +167,16 @@ pub fn cond(c: &Cond, d: &str, need: u8) -> String {
         Cond::Or(a, b) => wrap(OR, need, format!("{} || {}", cond(a, d, OR), cond(b, d, OR + 1))),
         Cond::Not(a) => wrap(UNARY, need, format!("!{}", cond(a, d, UNARY))),
         Cond::Paren(a) => format!("({})", cond(a, d, NONE)),
+        Cond::Block(a) => format!("{{ {} }}", cond(a, d, NONE)),
         // a block's statements: only a body's or an arm's whole (anywhere else rustc refuses it)
         Cond::Let(l, rest) => wrap(NONE, need, format!("{} {}", let_(l, d), cond(rest, d, NONE))),
-        Cond::Match(arms, default) => format!("match {d}.nr as i64 {{ {} }}", arms_(arms, default, d, |b| format!("{},", cond(b, d, NONE)))),
+        Cond::Match(arms, default) => format!(
+            "match {d}.nr as i64 {{ {} }}",
+            arms_(arms, default, d, |b| match b {
+                Cond::Block(_) => cond(b, d, NONE),
+                b => format!("{},", cond(b, d, NONE)),
+            })
+        ),
         Cond::Call { name, args, .. } => {
             let mut all = vec![d.to_string()];
             all.extend(args.iter().map(|a| a.to_string()));
@@ -341,6 +349,12 @@ impl<'a> Check<'a> {
                 self.cond(b)
             }
             Cond::Not(a) | Cond::Paren(a) => self.cond(a),
+            Cond::Block(a) => {
+                let saved = self.closures.clone();
+                let r = self.cond(a);
+                self.closures = saved;
+                r
+            }
             Cond::Let(l, rest) => {
                 let saved = self.closures.clone();
                 self.let_(l)?;
@@ -431,6 +445,7 @@ pub fn subst(c: &Cond, args: &[Val]) -> Cond {
         Cond::Or(x, y) => Cond::Or(b(x), b(y)),
         Cond::Not(x) => Cond::Not(b(x)),
         Cond::Paren(x) => Cond::Paren(b(x)),
+        Cond::Block(x) => Cond::Block(b(x)),
         // (a closure's body has none of these: the check refuses them there by their
         // substitution not matching, as they are left as they are)
         Cond::Let(..) | Cond::Match(..) | Cond::Call { .. } | Cond::Apply { .. } => c.clone(),

@@ -139,6 +139,16 @@
       };
 
       checks.${system} = {
+        # The compiler's proofs (src/proof.rs), every harness of its coverage list
+        # (src/proof-harnesses, which tests/print.rs keeps equal to it).
+        kani = kaniCheck {
+          name = "seccomp-fn-verify-proofs";
+          inherit src;
+          cargoLock = ./Cargo.lock;
+          runs = [ [ "-j" "2" "--output-format=terse" "--no-assertion-reach-checks" ] ];
+          expectHarnesses = map (h: "proof::${h}")
+            (pkgs.lib.filter (h: h != "") (pkgs.lib.splitString "\n" (builtins.readFile ./src/proof-harnesses)));
+        };
         # The tests: run_bpf sampled, and against the build machine's kernel.
         tests = pkgs.rustPlatform.buildRustPackage {
           pname = "seccomp-fn-verify-tests";
