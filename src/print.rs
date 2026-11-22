@@ -52,12 +52,7 @@ pub fn leaf_prec(src: &str) -> u8 {
     while i < b.len() {
         let (c, next) = (b[i], b.get(i + 1).copied().unwrap_or(b' '));
         // the char before, past spaces (`m ! ()`, a macro, as proc_macro2 prints it)
-        let prev = b[..i]
-            .iter()
-            .rev()
-            .copied()
-            .find(|c| *c != b' ')
-            .unwrap_or(b' ');
+        let prev = b[..i].iter().rev().copied().find(|c| *c != b' ').unwrap_or(b' ');
         match c {
             b'(' | b'[' | b'{' => depth += 1,
             b')' | b']' | b'}' => {
@@ -120,8 +115,7 @@ pub fn leaf_prec(src: &str) -> u8 {
 }
 
 const KEYWORDS: [&str; 18] = [
-    "if", "else", "match", "return", "break", "continue", "loop", "while", "for", "in", "let",
-    "move", "unsafe", "async", "await", "yield", "static", "become",
+    "if", "else", "match", "return", "break", "continue", "loop", "while", "for", "in", "let", "move", "unsafe", "async", "await", "yield", "static", "become",
 ];
 
 fn leaf(src: &str, need: u8) -> String {
@@ -154,19 +148,11 @@ pub fn val(v: &Val, d: &str, need: u8) -> String {
                 BitOp::And => (BAND, "&"),
                 BitOp::Or => (BOR, "|"),
             };
-            wrap(
-                p,
-                need,
-                format!("{} {o} {}", val(a, d, p), val(b, d, p + 1)),
-            )
+            wrap(p, need, format!("{} {o} {}", val(a, d, p), val(b, d, p + 1)))
         }
         Val::Shift(op, a, k) => {
             let o = if *op == ShiftOp::Shl { "<<" } else { ">>" };
-            wrap(
-                SHIFT,
-                need,
-                format!("{} {o} {}", val(a, d, SHIFT), leaf(k.src, SHIFT + 1)),
-            )
+            wrap(SHIFT, need, format!("{} {o} {}", val(a, d, SHIFT), leaf(k.src, SHIFT + 1)))
         }
         Val::Paren(a) => format!("({})", val(a, d, NONE)),
         Val::Param(_, name) => name.to_string(),
@@ -178,26 +164,8 @@ pub fn cond(c: &Cond, d: &str, need: u8) -> String {
     match c {
         Cond::Static(l) => leaf(l.src, need),
         // comparisons don't chain: both sides tighter
-        Cond::Cmp(op, a, b) => wrap(
-            CMP,
-            need,
-            format!(
-                "{} {} {}",
-                val(a, d, CMP + 1),
-                cmp_op(*op),
-                val(b, d, CMP + 1)
-            ),
-        ),
-        Cond::SCmp(op, a, b) => wrap(
-            CMP,
-            need,
-            format!(
-                "{} {} {}",
-                val(a, d, CMP + 1),
-                cmp_op(*op),
-                val(b, d, CMP + 1)
-            ),
-        ),
+        Cond::Cmp(op, a, b) => wrap(CMP, need, format!("{} {} {}", val(a, d, CMP + 1), cmp_op(*op), val(b, d, CMP + 1))),
+        Cond::SCmp(op, a, b) => wrap(CMP, need, format!("{} {} {}", val(a, d, CMP + 1), cmp_op(*op), val(b, d, CMP + 1))),
         // a method call binds tighter than anything: its receiver an atom
         Cond::IsNull(a) => format!("{}.is_null()", val(a, d, ATOM)),
         Cond::CallMatch(m) => format!(
@@ -207,25 +175,13 @@ pub fn cond(c: &Cond, d: &str, need: u8) -> String {
                 b => format!("{},", cond(b, d, NONE)),
             })
         ),
-        Cond::And(a, b) => wrap(
-            AND,
-            need,
-            format!("{} && {}", cond(a, d, AND), cond(b, d, AND + 1)),
-        ),
-        Cond::Or(a, b) => wrap(
-            OR,
-            need,
-            format!("{} || {}", cond(a, d, OR), cond(b, d, OR + 1)),
-        ),
+        Cond::And(a, b) => wrap(AND, need, format!("{} && {}", cond(a, d, AND), cond(b, d, AND + 1))),
+        Cond::Or(a, b) => wrap(OR, need, format!("{} || {}", cond(a, d, OR), cond(b, d, OR + 1))),
         Cond::Not(a) => wrap(UNARY, need, format!("!{}", cond(a, d, UNARY))),
         Cond::Paren(a) => format!("({})", cond(a, d, NONE)),
         Cond::Block(a) => format!("{{ {} }}", cond(a, d, NONE)),
         // a block's statements: only a body's or an arm's whole (anywhere else rustc refuses it)
-        Cond::Let(l, rest) => wrap(
-            NONE,
-            need,
-            format!("{} {}", let_(l, d), cond(rest, d, NONE)),
-        ),
+        Cond::Let(l, rest) => wrap(NONE, need, format!("{} {}", let_(l, d), cond(rest, d, NONE))),
         Cond::Match(arms, default) => format!(
             "match {d}.nr as i64 {{ {} }}",
             arms_(arms, default, d, |b| match b {
@@ -239,13 +195,7 @@ pub fn cond(c: &Cond, d: &str, need: u8) -> String {
             format!("{name}({})", all.join(", "))
         }
         Cond::Apply { name, args, .. } => {
-            format!(
-                "{name}({})",
-                args.iter()
-                    .map(|a| val(a, d, NONE))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
+            format!("{name}({})", args.iter().map(|a| val(a, d, NONE)).collect::<Vec<_>>().join(", "))
         }
     }
 }
@@ -315,12 +265,7 @@ pub fn stmt(s: &Stmt, d: &str) -> String {
             };
             format!("if {} {{ {} }} else {els}", cond(c, d, NONE), stmt(a, d))
         }
-        Stmt::IfThen(c, a, rest) => format!(
-            "if {} {{ {} }} {}",
-            cond(c, d, NONE),
-            stmt(a, d),
-            stmt(rest, d)
-        ),
+        Stmt::IfThen(c, a, rest) => format!("if {} {{ {} }} {}", cond(c, d, NONE), stmt(a, d), stmt(rest, d)),
         Stmt::Match(arms, default) => format!(
             "match {d}.nr as i64 {{ {} }}",
             arms_(arms, default, d, |b| match b {
@@ -347,12 +292,7 @@ impl Policy {
 
     /// The hygiene the print relies on (the module's doc): `Err` names what is refused.
     pub fn check(&self) -> Result<(), String> {
-        let mut cx = Check {
-            d: vec![self.d],
-            closures: vec![],
-            params: vec![],
-            arm: None,
-        };
+        let mut cx = Check { d: vec![self.d], closures: vec![], params: vec![], arm: None };
         cx.stmt(&self.body)
     }
 }
@@ -403,25 +343,20 @@ impl<'a> Check<'a> {
             Let::Plain(src) => {
                 self.text(src, "a let")?;
                 // a closure it shadows is out of scope
-                self.closures
-                    .retain(|c| !matches!(c, Let::Closure { name, .. } if has_word(src, name)));
+                self.closures.retain(|c| !matches!(c, Let::Closure { name, .. } if has_word(src, name)));
                 Ok(())
             }
             Let::Closure { name, params, body } => {
                 for (p, _) in params {
                     if self.d.contains(p) {
-                        return Err(format!(
-                            "closure `{name}`'s parameter `{p}` is the call's name"
-                        ));
+                        return Err(format!("closure `{name}`'s parameter `{p}` is the call's name"));
                     }
                 }
-                let outer =
-                    std::mem::replace(&mut self.params, params.iter().map(|(p, _)| *p).collect());
+                let outer = std::mem::replace(&mut self.params, params.iter().map(|(p, _)| *p).collect());
                 let r = self.cond(body);
                 self.params = outer;
                 r?;
-                self.closures
-                    .retain(|c| !matches!(c, Let::Closure { name: n, .. } if n == name));
+                self.closures.retain(|c| !matches!(c, Let::Closure { name: n, .. } if n == name));
                 self.closures.push(l);
                 Ok(())
             }
@@ -430,15 +365,9 @@ impl<'a> Check<'a> {
 
     fn pats(&self, pats: &[Leaf<i64>]) -> Result<(), String> {
         for p in pats {
-            let ok = !p.src.is_empty()
-                && p.src
-                    .bytes()
-                    .all(|c| c.is_ascii_alphanumeric() || b"_: -".contains(&c));
+            let ok = !p.src.is_empty() && p.src.bytes().all(|c| c.is_ascii_alphanumeric() || b"_: -".contains(&c));
             if !ok {
-                return Err(format!(
-                    "a pattern `{}` other than a path or an integer",
-                    p.src
-                ));
+                return Err(format!("a pattern `{}` other than a path or an integer", p.src));
             }
             self.text(p.src, "a pattern")?;
         }
@@ -454,17 +383,11 @@ impl<'a> Check<'a> {
                 Some(ps @ [p0, ..])
                     if p0.call == *call
                         && Field::typed(call, name) == Some(*f)
-                        && ps.iter().all(|p| {
-                            p.binds.contains(name)
-                                && crate::calls::field(p.call, name)
-                                    == crate::calls::field(call, name)
-                        }) =>
+                        && ps.iter().all(|p| p.binds.contains(name) && crate::calls::field(p.call, name) == crate::calls::field(call, name)) =>
                 {
                     Ok(())
                 }
-                _ => Err(format!(
-                    "a field `{name}` of `{call}` that its arm doesn't bind"
-                )),
+                _ => Err(format!("a field `{name}` of `{call}` that its arm doesn't bind")),
             },
             Val::Field(_) => Ok(()),
             Val::Const(l) => self.text(l.src, "a leaf"),
@@ -536,40 +459,21 @@ impl<'a> Check<'a> {
                 }
                 self.cond(default)
             }
-            Cond::Call {
-                name,
-                args,
-                d,
-                body,
-            } => {
-                if self
-                    .closures
-                    .iter()
-                    .any(|c| matches!(c, Let::Closure { name: n, .. } if n == name))
-                {
+            Cond::Call { name, args, d, body } => {
+                if self.closures.iter().any(|c| matches!(c, Let::Closure { name: n, .. } if n == name)) {
                     return Err(format!("a call of `{name}`, a closure in scope"));
                 }
                 for a in args {
                     self.text(a, "an argument")?;
                 }
                 // the callee's body: its own name for `d`, no closure of the caller's, no params
-                let saved = (
-                    std::mem::replace(&mut self.d, vec![d]),
-                    std::mem::take(&mut self.closures),
-                    std::mem::take(&mut self.params),
-                );
+                let saved = (std::mem::replace(&mut self.d, vec![d]), std::mem::take(&mut self.closures), std::mem::take(&mut self.params));
                 let r = self.cond(body);
                 (self.d, self.closures, self.params) = saved;
                 r
             }
             Cond::Apply { name, args, body } => {
-                let Some(Let::Closure {
-                    params, body: def, ..
-                }) = self
-                    .closures
-                    .iter()
-                    .rev()
-                    .find(|c| matches!(c, Let::Closure { name: n, .. } if n == name))
+                let Some(Let::Closure { params, body: def, .. }) = self.closures.iter().rev().find(|c| matches!(c, Let::Closure { name: n, .. } if n == name))
                 else {
                     return Err(format!("a call of `{name}`, no closure in scope"));
                 };
@@ -621,11 +525,7 @@ impl<'a> Check<'a> {
     /// A `match d.call()`: each arm's pattern a variant of the table's, its binds its fields,
     /// distinct; its one pattern that variant's number; its guard and body with the pattern
     /// in scope.
-    fn call_match<B>(
-        &mut self,
-        m: &'a CallMatch<B>,
-        body: impl Fn(&mut Self, &'a B) -> Result<(), String>,
-    ) -> Result<(), String> {
+    fn call_match<B>(&mut self, m: &'a CallMatch<B>, body: impl Fn(&mut Self, &'a B) -> Result<(), String>) -> Result<(), String> {
         if m.pats.len() != m.arms.len() {
             return Err("a `match` on the call whose patterns aren't its arms'".into());
         }
@@ -644,40 +544,23 @@ impl<'a> Check<'a> {
                 return Err("alternatives of `match d.call()` that bind different fields".into());
             }
             for (p, l) in ps.iter().zip(&a.pats) {
-                let nr = crate::calls::nr(p.call)
-                    .ok_or_else(|| format!("`Call::{}`, not a call of the table's", p.call))?;
+                let nr = crate::calls::nr(p.call).ok_or_else(|| format!("`Call::{}`, not a call of the table's", p.call))?;
                 if l.value != nr || l.src != p.call {
-                    return Err(format!(
-                        "an arm `Call::{}` whose pattern isn't its number",
-                        p.call
-                    ));
+                    return Err(format!("an arm `Call::{}` whose pattern isn't its number", p.call));
                 }
-                let all = crate::calls::CALLS
-                    .iter()
-                    .find(|r| r.0 == p.call)
-                    .map_or(0, |r| r.2.len());
+                let all = crate::calls::CALLS.iter().find(|r| r.0 == p.call).map_or(0, |r| r.2.len());
                 for (i, b) in p.binds.iter().enumerate() {
                     if crate::calls::field(p.call, b).is_none() || p.binds[..i].contains(b) {
-                        return Err(format!(
-                            "`Call::{} {{ {b} }}`: not one of its fields, or twice",
-                            p.call
-                        ));
+                        return Err(format!("`Call::{} {{ {b} }}`: not one of its fields, or twice", p.call));
                     }
                     if self.d.contains(b) {
                         return Err(format!("a field bound as `{b}`, the call's name"));
                     }
                 }
                 // rustc's: all fields bound, or `..`; a bare path only for a variant without any
-                let as_rust = if all == 0 {
-                    p.binds.is_empty()
-                } else {
-                    p.braces && (p.rest || p.binds.len() == all)
-                };
+                let as_rust = if all == 0 { p.binds.is_empty() } else { p.braces && (p.rest || p.binds.len() == all) };
                 if !as_rust {
-                    return Err(format!(
-                        "the pattern of `Call::{}` as Rust needs it",
-                        p.call
-                    ));
+                    return Err(format!("the pattern of `Call::{}` as Rust needs it", p.call));
                 }
             }
             self.arm = Some(ps);
@@ -727,16 +610,8 @@ pub fn subst(c: &Cond, args: &[Val]) -> Cond {
     let b = |c: &Cond| Box::new(subst(c, args));
     match c {
         Cond::Static(_) => c.clone(),
-        Cond::Cmp(op, x, y) => Cond::Cmp(
-            *op,
-            Box::new(subst_val(x, args)),
-            Box::new(subst_val(y, args)),
-        ),
-        Cond::SCmp(op, x, y) => Cond::SCmp(
-            *op,
-            Box::new(subst_val(x, args)),
-            Box::new(subst_val(y, args)),
-        ),
+        Cond::Cmp(op, x, y) => Cond::Cmp(*op, Box::new(subst_val(x, args)), Box::new(subst_val(y, args))),
+        Cond::SCmp(op, x, y) => Cond::SCmp(*op, Box::new(subst_val(x, args)), Box::new(subst_val(y, args))),
         Cond::IsNull(x) => Cond::IsNull(Box::new(subst_val(x, args))),
         Cond::And(x, y) => Cond::And(b(x), b(y)),
         Cond::Or(x, y) => Cond::Or(b(x), b(y)),
@@ -745,11 +620,7 @@ pub fn subst(c: &Cond, args: &[Val]) -> Cond {
         Cond::Block(x) => Cond::Block(b(x)),
         // (a closure's body has none of these: the check refuses them there by their
         // substitution not matching, as they are left as they are)
-        Cond::Let(..)
-        | Cond::Match(..)
-        | Cond::CallMatch(..)
-        | Cond::Call { .. }
-        | Cond::Apply { .. } => c.clone(),
+        Cond::Let(..) | Cond::Match(..) | Cond::CallMatch(..) | Cond::Call { .. } | Cond::Apply { .. } => c.clone(),
     }
 }
 
