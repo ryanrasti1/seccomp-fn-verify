@@ -41,6 +41,7 @@
 mod bpf;
 pub mod compile;
 pub mod expr;
+pub mod print;
 #[cfg(kani)]
 mod proof;
 pub use bpf::{MAX_INSNS, run_bpf};

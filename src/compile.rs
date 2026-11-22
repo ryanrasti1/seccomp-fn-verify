@@ -111,14 +111,38 @@ pub fn jcond_insns<C: Code>(code: u16, k: u32, t: usize, f: usize) -> C {
 
 /// A condition's value if it has no `d`: decided when the program is built.
 pub fn stat(c: &Cond) -> Option<bool> {
+    stat_by(c, stat)
+}
+
+/// `stat`'s line for `c`, its children's by `s` (as `eval_by`).
+pub fn stat_by(c: &Cond, s: impl Fn(&Cond) -> Option<bool>) -> Option<bool> {
     match c {
         Cond::Static(l) => Some(l.value),
         Cond::Cmp(..) => None,
-        Cond::And(a, b) => stat_and(stat(a), stat(b)),
-        Cond::Or(a, b) => stat_and(stat(a).map(|v| !v), stat(b).map(|v| !v)).map(|v| !v),
-        Cond::Not(a) => stat(a).map(|v| !v),
-        Cond::Paren(a) => stat(a),
+        Cond::And(a, b) => stat_and(s(a), s(b)),
+        Cond::Or(a, b) => stat_and(s(a).map(|v| !v), s(b).map(|v| !v)).map(|v| !v),
+        Cond::Not(a) => s(a).map(|v| !v),
+        Cond::Paren(a) | Cond::Let(_, a) => s(a),
+        Cond::Call { body, .. } | Cond::Apply { body, .. } => s(body),
+        // every arm dead: the default's (its code is the default's); else its code loads nr
+        Cond::Match(arms, default) => stat_match(arms, s(default), &s),
     }
+}
+
+/// A `match` of conditions, its default's stat given: every arm dead, the default's (its code
+/// is the default's); else undecided (its code loads nr).
+pub fn stat_match<B>(arms: &[Arm<B>], default: Option<bool>, s: impl Fn(&Cond) -> Option<bool>) -> Option<bool> {
+    stat_arm(arms.iter().all(|a| dead(a, &s)), default)
+}
+
+/// A `match` arm that can't match: no pattern is an i32, or its guard is decided false.
+pub fn dead<B>(a: &Arm<B>, s: impl Fn(&Cond) -> Option<bool>) -> bool {
+    !a.pats.iter().any(|p| fits(p.value)) || a.guard.as_ref().and_then(s) == Some(false)
+}
+
+/// An arm then the rest (of conditions): decided if the arm is dead and the rest decided.
+pub fn stat_arm(dead: bool, rest: Option<bool>) -> Option<bool> {
+    if dead { rest } else { None }
 }
 
 pub fn stat_and(a: Option<bool>, b: Option<bool>) -> Option<bool> {
@@ -127,6 +151,16 @@ pub fn stat_and(a: Option<bool>, b: Option<bool>) -> Option<bool> {
         (Some(true), s) | (s, Some(true)) => s,
         (None, None) => None,
     }
+}
+
+/// `!a`: `a` to the other exits.
+pub fn t_not<C: Code>(a: impl FnOnce(usize, usize) -> C, t: usize, f: usize) -> C {
+    a(f, t)
+}
+
+/// `(a)`, `let …; a`, a call (`f(d, …)`, `g(x)`), a `match` with no arm left: `a`'s code.
+pub fn t_same<C: Code>(a: impl FnOnce(usize, usize) -> C, t: usize, f: usize) -> C {
+    a(t, f)
 }
 
 /// `Static`
@@ -186,7 +220,7 @@ pub fn hi_zero(v: &Val) -> bool {
         Val::Field(f) => !f.wide(),
         Val::Const(l) => l.value >> 32 == 0,
         Val::Bit(op, a, b) => hz_bit(*op, hi_zero(a), hi_zero(b)),
-        Val::Shift(..) => false,
+        Val::Shift(..) | Val::Param(..) => false,
         Val::Paren(a) => hi_zero(a),
     }
 }
@@ -322,6 +356,63 @@ pub fn t_bit<C: Code>(op: BitOp, ka: Option<u64>, kb: Option<u64>, a: ValGen<C>,
     c.then(C::insn(alu | src, 0, 0, imm))
 }
 
+/// `(a)`: `a`'s code.
+pub fn t_vsame<C: Code>(a: ValGen<C>, hi: bool, k: usize) -> C {
+    a(hi, k)
+}
+
+/// `a << s`, `a >> s`, `s` a leaf below the width (Rust panics past it: refused). `wide`: `a`
+/// is a u64 (else a u32: its low half alone, the high half 0). A u64's half shifted in from the
+/// other half is or-ed in through `M[k]`.
+pub fn t_shift<C: Code>(op: ShiftOp, wide: bool, s: u32, a: ValGen<C>, hi: bool, k: usize) -> C {
+    let shl = op == ShiftOp::Shl;
+    let (sh, back) = if shl { (LSH_K, RSH_K) } else { (RSH_K, LSH_K) };
+    if !wide {
+        return match (s < 32, hi) {
+            (false, _) => C::refuse("a shift of a u32 by 32 or more"),
+            (true, false) => a(false, k).then(C::insn(sh, 0, 0, s)),
+            (true, true) => C::insn(LD_W_IMM, 0, 0, 0),
+        };
+    }
+    if s >= 64 {
+        return C::refuse("a shift of a u64 by 64 or more");
+    }
+    // the half the bits move toward (Shl: the high one), or the one they leave
+    let toward = hi == shl;
+    match (toward, s) {
+        // the half they leave: shifted, or (by 32 or more) 0
+        (false, s) if s < 32 => a(hi, k).then(C::insn(sh, 0, 0, s)),
+        (false, _) => C::insn(LD_W_IMM, 0, 0, 0),
+        (true, 0) => a(hi, k),
+        (true, s) if s < 32 => {
+            if k >= MEMWORDS {
+                return C::refuse("a value nested past the scratch memory's 16 slots");
+            }
+            // the other half's bits moving in, then this half's own, or-ed
+            a(!hi, k)
+                .then(C::insn(back, 0, 0, 32 - s))
+                .then(C::insn(ST, 0, 0, k as u32))
+                .then(a(hi, k + 1))
+                .then(C::insn(sh, 0, 0, s))
+                .then(C::insn(LDX_MEM, 0, 0, k as u32))
+                .then(C::insn(OR_X, 0, 0, 0))
+        }
+        // by 32 or more: the other half's, shifted by the rest
+        (true, s) => a(!hi, k).then(C::insn(sh, 0, 0, s - 32)),
+    }
+}
+
+/// A closure's parameter outside its closure: refused (`Cond::Apply` holds its body with each
+/// replaced).
+pub fn t_param<C: Code>() -> C {
+    C::refuse("a closure's parameter outside its closure")
+}
+
+/// `let …; s`, `{ s }`, a `match` with no arm left: `s`'s code.
+pub fn t_ssame<C: Code>(s: impl FnOnce() -> C) -> C {
+    s()
+}
+
 // ---- statements ----
 
 /// `v`, `return v;`
@@ -366,6 +457,38 @@ pub fn t_arm<C: Code>(
     C::insn(LD_W_ABS, 0, 0, OFF_NR).then(cp).then(cg).then(cb).then(cr)
 }
 
+/// A `match` arm of conditions then the arms after it (`rest`), to `t` or `f`: as
+/// [`t_arm`], the body's exits past the rest. A body decided when the program is built (`sb`,
+/// `true` the common one) is no code: the guard's (or the patterns') exit is the body's.
+#[allow(clippy::too_many_arguments)]
+pub fn t_carm<C: Code>(
+    fit: bool,
+    sg: Option<bool>,
+    sb: Option<bool>,
+    pats: impl FnOnce(usize, usize) -> C,
+    guard: impl FnOnce(usize, usize) -> C,
+    body: impl FnOnce(usize, usize) -> C,
+    rest: impl FnOnce(usize, usize) -> C,
+    t: usize,
+    f: usize,
+) -> C {
+    let cr = rest(t, f);
+    if !fit || sg == Some(false) {
+        return cr;
+    }
+    let r = cr.len();
+    // where the body is: its code, and the exit to it from the guard (0: next), or the body's
+    // own exit when it has no code
+    let (cb, into) = match sb {
+        Some(v) => (C::empty(), r + if v { t } else { f }),
+        None => (body(r + t, r + f), 0),
+    };
+    let nb = cb.len();
+    let (cg, into) = if sg == Some(true) { (C::empty(), into) } else { (guard(into, nb), 0) };
+    let cp = pats(into, cg.len() + nb);
+    C::insn(LD_W_ABS, 0, 0, OFF_NR).then(cp).then(cg).then(cb).then(cr)
+}
+
 /// `d.nr` (as `i64`) is `p`, an `i32`.
 pub fn fits(p: i64) -> bool {
     p as i32 as i64 == p
@@ -395,8 +518,10 @@ pub fn cond(c: &Cond, t: usize, f: usize) -> Vec<sock_filter> {
         }
         Cond::And(a, b) => t_and(stat(a), stat(b), |t, f| cond(a, t, f), |t, f| cond(b, t, f), t, f),
         Cond::Or(a, b) => t_or(stat(a), stat(b), |t, f| cond(a, t, f), |t, f| cond(b, t, f), t, f),
-        Cond::Not(a) => cond(a, f, t),
-        Cond::Paren(a) => cond(a, t, f),
+        Cond::Not(a) => t_not(|t, f| cond(a, t, f), t, f),
+        Cond::Paren(a) | Cond::Let(_, a) => t_same(|t, f| cond(a, t, f), t, f),
+        Cond::Call { body, .. } | Cond::Apply { body, .. } => t_same(|t, f| cond(body, t, f), t, f),
+        Cond::Match(arms, default) => carms_code(arms, default, t, f),
     }
 }
 
@@ -405,22 +530,23 @@ pub fn val(v: &Val, hi: bool, k: usize) -> Vec<sock_filter> {
         Val::Field(f) => t_field(*f, hi),
         Val::Const(l) => t_const(l.value, hi),
         Val::Bit(op, a, b) => t_bit(*op, a.as_const(), b.as_const(), &mut |h, k| val(a, h, k), &mut |h, k| val(b, h, k), hi, k),
-        Val::Shift(..) => Code::refuse("a shift (not yet)"),
-        Val::Paren(a) => val(a, hi, k),
+        Val::Shift(op, a, s) => t_shift(*op, a.wide(), s.value, &mut |h, k| val(a, h, k), hi, k),
+        Val::Paren(a) => t_vsame(&mut |h, k| val(a, h, k), hi, k),
+        Val::Param(..) => t_param(),
     }
 }
 
 pub fn stmt(s: &Stmt) -> Vec<sock_filter> {
     match s {
         Stmt::Verdict(v) | Stmt::Return(v) => t_ret(v.value),
-        Stmt::Let(_, s) | Stmt::Block(s) => stmt(s),
+        Stmt::Let(_, s) | Stmt::Block(s) => t_ssame(|| stmt(s)),
         Stmt::If(c, a, b) | Stmt::IfThen(c, a, b) => t_if(stat(c), |t, f| cond(c, t, f), || stmt(a), || stmt(b)),
         Stmt::Match(arms, default) => arms_code(arms, default),
     }
 }
 
-fn arms_code(arms: &[Arm], default: &Stmt) -> Vec<sock_filter> {
-    let Some((a, rest)) = arms.split_first() else { return stmt(default) };
+fn arms_code(arms: &[Arm<Stmt>], default: &Stmt) -> Vec<sock_filter> {
+    let Some((a, rest)) = arms.split_first() else { return t_ssame(|| stmt(default)) };
     let sg = a.guard.as_ref().map_or(Some(true), stat);
     t_arm(
         a.pats.iter().any(|p| fits(p.value)),
@@ -432,6 +558,22 @@ fn arms_code(arms: &[Arm], default: &Stmt) -> Vec<sock_filter> {
     )
 }
 
+fn carms_code(arms: &[Arm<Cond>], default: &Cond, t: usize, f: usize) -> Vec<sock_filter> {
+    let Some((a, rest)) = arms.split_first() else { return t_same(|t, f| cond(default, t, f), t, f) };
+    let sg = a.guard.as_ref().map_or(Some(true), stat);
+    t_carm(
+        a.pats.iter().any(|p| fits(p.value)),
+        sg,
+        stat(&a.body),
+        |t, f| pats(&a.pats, t, f),
+        |t, f| cond(a.guard.as_ref().expect("a guard: t_carm calls this only if sg isn't Some(true)"), t, f),
+        |t, f| cond(&a.body, t, f),
+        |t, f| carms_code(rest, default, t, f),
+        t,
+        f,
+    )
+}
+
 fn pats(ps: &[Leaf<i64>], t: usize, f: usize) -> Vec<sock_filter> {
     let Some((p, rest)) = ps.split_first() else { return Code::refuse("an arm without a pattern") };
     t_pats(p.value, rest.iter().any(|p| fits(p.value)), |t, f| pats(rest, t, f), t, f)
@@ -440,6 +582,9 @@ fn pats(ps: &[Leaf<i64>], t: usize, f: usize) -> Vec<sock_filter> {
 /// The policy's program: its body's statement code, checked as the kernel checks it (so
 /// a program this returns is one the kernel takes). Panics if the compiler refuses the tree.
 pub fn compile(p: &Policy) -> Vec<sock_filter> {
+    if let Err(e) = p.check() {
+        panic!("seccomp_fn_verify::compile: {e}");
+    }
     let prog = stmt(&p.body);
     check(&prog);
     prog

@@ -13,7 +13,7 @@
 use libc::seccomp_data;
 
 /// An expression without `d`: `value`, rustc's, of the source `src`.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Leaf<T> {
     pub value: T,
     pub src: &'static str,
@@ -55,7 +55,7 @@ pub enum ShiftOp {
 }
 
 /// A value: an integer, u32 or u64 (as Rust types it: a field's type), held zero-extended.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Val {
     Field(Field),
     /// An expression without `d`, of the type of what it is compared or combined with.
@@ -66,10 +66,13 @@ pub enum Val {
     Shift(ShiftOp, Box<Val>, Leaf<u32>),
     /// `(a)`
     Paren(Box<Val>),
+    /// A closure's parameter `i`, by its name (only in a closure's body: [`Cond::Apply`]
+    /// holds the body with each replaced by its argument).
+    Param(u8, &'static str),
 }
 
 /// A condition.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Cond {
     /// A condition without `d`: `threads`, `fs == Fs::ReadWrite`.
     Static(Leaf<bool>),
@@ -83,34 +86,55 @@ pub enum Cond {
     Not(Box<Cond>),
     /// `(a)`
     Paren(Box<Cond>),
+    /// `let …;` then `rest` (as [`Stmt::Let`])
+    Let(Let, Box<Cond>),
+    /// `match d.nr as i64 { arms… _ => default, }`, of conditions
+    Match(Vec<Arm<Cond>>, Box<Cond>),
+    /// `f(d, args…)`: a `fn f(d: &seccomp_data, params…) -> bool` of the policy's file, its
+    /// `body` with `d` its own name for `d` and its params bound to the args (each without
+    /// `d`: rustc computes the body's leaves with them bound, in the call's place)
+    Call { name: &'static str, args: Vec<&'static str>, d: &'static str, body: Box<Cond> },
+    /// `f(args…)`, `f` a closure in scope ([`Let::Closure`]): its body, each parameter replaced
+    /// by its argument (checked: [`Policy::check`])
+    Apply { name: &'static str, args: Vec<Val>, body: Box<Cond> },
+}
+
+/// A `let` statement.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Let {
+    /// `let …;` without `d`, its source: it binds names later leaves use (rustc computes them,
+    /// in the same scope)
+    Plain(&'static str),
+    /// `let name = |params| body;`: a closure of `d`-values to a condition, each param its
+    /// name and its source (`fd`, `fd: u64`)
+    Closure { name: &'static str, params: Vec<(&'static str, &'static str)>, body: Box<Cond> },
 }
 
 /// A statement list's value: what the closure returns.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Stmt {
     /// `v`, the block's value
     Verdict(Leaf<u32>),
     /// `return v;`
     Return(Leaf<u32>),
-    /// `let …;` (a statement without `d`, its source; it binds names later leaves use, and
-    /// rustc computes them, in the same scope), then `rest`
-    Let(&'static str, Box<Stmt>),
+    /// `let …;` then `rest`
+    Let(Let, Box<Stmt>),
     /// `if c { a } else b`, `b` a [`Stmt::Block`] or an `if`
     If(Cond, Box<Stmt>, Box<Stmt>),
     /// `if c { a } rest`: `a` returns (rustc refuses an `if` without `else` of a value)
     IfThen(Cond, Box<Stmt>, Box<Stmt>),
     /// `match d.nr as i64 { arms… _ => default, }`
-    Match(Vec<Arm>, Box<Stmt>),
+    Match(Vec<Arm<Stmt>>, Box<Stmt>),
     /// `{ s }`
     Block(Box<Stmt>),
 }
 
 /// `p | q … if guard => body`, the patterns consts (as `i64`), at least one.
-#[derive(Clone, Debug)]
-pub struct Arm {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Arm<B> {
     pub pats: Vec<Leaf<i64>>,
     pub guard: Option<Cond>,
-    pub body: Stmt,
+    pub body: B,
 }
 
 /// A policy's closure: `move |d| body`, `d` its parameter's name.
@@ -170,6 +194,7 @@ impl Val {
             Val::Shift(ShiftOp::Shl, a, k) => v(a) << k.value,
             Val::Shift(ShiftOp::Shr, a, k) => v(a) >> k.value,
             Val::Paren(a) => v(a),
+            Val::Param(..) => panic!("a closure's parameter outside its closure"),
         }
     }
 
@@ -185,6 +210,7 @@ impl Val {
                 _ => a.wide(),
             },
             Val::Shift(_, a, _) | Val::Paren(a) => a.wide(),
+            Val::Param(..) => true,
         }
     }
 
@@ -199,17 +225,19 @@ impl Val {
 
 impl Cond {
     pub fn eval(&self, d: &seccomp_data) -> bool {
-        self.eval_by(|c| c.eval(d), |v| v.eval(d))
+        self.eval_by(d, |c| c.eval(d), |v| v.eval(d))
     }
 
-    pub fn eval_by(&self, c: impl Fn(&Cond) -> bool, v: impl Fn(&Val) -> u64) -> bool {
+    pub fn eval_by(&self, d: &seccomp_data, c: impl Fn(&Cond) -> bool, v: impl Fn(&Val) -> u64) -> bool {
         match self {
             Cond::Static(l) => l.value,
             Cond::Cmp(op, a, b) => op.holds(v(a), v(b)),
             Cond::And(a, b) => c(a) && c(b),
             Cond::Or(a, b) => c(a) || c(b),
             Cond::Not(a) => !c(a),
-            Cond::Paren(a) => c(a),
+            Cond::Paren(a) | Cond::Let(_, a) => c(a),
+            Cond::Match(arms, default) => match_by(arms, default, d, &c, &c),
+            Cond::Call { body, .. } | Cond::Apply { body, .. } => c(body),
         }
     }
 }
@@ -230,20 +258,20 @@ impl Stmt {
                     s(b)
                 }
             }
-            Stmt::Match(arms, default) => match_by(arms, default, d, c, s),
+            Stmt::Match(arms, default) => match_by(arms, default, d, &c, &s),
         }
     }
 }
 
 /// A `match`: the first arm whose pattern is `d.nr as i64` and whose guard holds, else `default`.
-pub fn match_by(arms: &[Arm], default: &Stmt, d: &seccomp_data, c: impl Fn(&Cond) -> bool, s: impl Fn(&Stmt) -> u32) -> u32 {
+pub fn match_by<B, R>(arms: &[Arm<B>], default: &B, d: &seccomp_data, c: &impl Fn(&Cond) -> bool, b: &impl Fn(&B) -> R) -> R {
     match arms.split_first() {
-        None => s(default),
+        None => b(default),
         Some((a, rest)) => {
-            if member(&a.pats, d) && a.guard.as_ref().is_none_or(&c) {
-                s(&a.body)
+            if member(&a.pats, d) && a.guard.as_ref().is_none_or(c) {
+                b(&a.body)
             } else {
-                match_by(rest, default, d, c, s)
+                match_by(rest, default, d, c, b)
             }
         }
     }
