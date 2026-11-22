@@ -610,10 +610,9 @@ fn pats(ps: &[Leaf<i64>], t: usize, f: usize) -> Vec<sock_filter> {
 
 /// The policy's program: its body's statement code, checked as the kernel checks it (so
 /// a program this returns is one the kernel takes). Panics if the compiler refuses the tree.
+/// (The hygiene check, `Policy::check`, is the front end's: `bpf!` runs it for its errors; the
+/// claim doesn't rest on it, as the per-policy check compares the tree with the policy.)
 pub fn compile(p: &Policy) -> Vec<sock_filter> {
-    if let Err(e) = p.check() {
-        panic!("seccomp_fn_verify::compile: {e}");
-    }
     let prog = stmt(&p.body);
     check(&prog);
     prog

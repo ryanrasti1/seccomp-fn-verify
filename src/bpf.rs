@@ -6,7 +6,7 @@ use core::mem::{offset_of, size_of};
 use libc::{seccomp_data as SeccompData, sock_filter as SockFilter};
 
 /// Offsets in `seccomp_data`, libc's: of a 64-bit field's low and high halves, as the target's
-/// byte order puts them.
+/// byte order puts them. (The compiler's, for the loads it emits; `run_bpf` reads the words.)
 const fn halves(off: usize) -> (u32, u32) {
     let (lo, hi) = if cfg!(target_endian = "little") { (off, off + 4) } else { (off + 4, off) };
     (lo as u32, hi as u32)
@@ -145,28 +145,36 @@ pub(crate) enum Step {
     Return(u32),
 }
 
+// `seccomp_data` as the kernel reads it: the size of 16 words (what `words` relies on), the
+// fields at these offsets (libc's).
+const _: () = {
+    assert!(size_of::<SeccompData>() == size_of::<[u32; 16]>());
+    assert!(offset_of!(SeccompData, nr) == 0);
+    assert!(offset_of!(SeccompData, arch) == 4);
+    assert!(offset_of!(SeccompData, instruction_pointer) == 8);
+    assert!(offset_of!(SeccompData, args) == 16);
+};
+
+/// `d` as 32-bit words: a load of `k` is word `k / 4`, as the kernel's
+/// `*(u32 *)((char *)&sd + k)`, in the native layout (the kernel's: no byte order to undo).
+fn words(d: &SeccompData) -> &[u32; 16] {
+    // SAFETY: `seccomp_data` is `repr(C)`, the size of `[u32; 16]` without padding (asserted
+    // above: its four fields end to end), aligned to 8, at least `[u32; 16]`'s 4; every bit
+    // pattern is a valid `u32`; the view borrows `d`, which outlives it.
+    unsafe { &*(d as *const SeccompData as *const [u32; 16]) }
+}
+
 /// One instruction, run on `s`.
 pub(crate) fn step(s: &mut State, SockFilter { code, jt, jf, k }: SockFilter, d: &SeccompData) -> Step {
     // the 32-bit word at `off`, by libc's layout (`check` allows only aligned words inside it,
     // each a field's or a half of one's)
-    let word = |off: u32| -> u32 {
-        let (v, (lo, _)) = match off {
-            OFF_NR => return d.nr as u32,
-            OFF_ARCH => return d.arch,
-            _ if off == OFF_IP.0 || off == OFF_IP.1 => (d.instruction_pointer, OFF_IP),
-            _ => {
-                let i = ((off - off_arg(0).0.min(off_arg(0).1)) / 8) as usize;
-                (d.args[i], off_arg(i))
-            }
-        };
-        if off == lo { v as u32 } else { (v >> 32) as u32 }
-    };
     let src = if code & SRC == X { s.x } else { k };
     match code & CLASS {
         LD | LDX => {
             let v = match (code & MODE) as u32 {
                 BPF_IMM => k,
-                BPF_ABS => word(k),
+                // `check` allows only aligned words inside it: `k / 4` below 16
+                BPF_ABS => words(d)[(k / 4) as usize],
                 BPF_MEM => s.mem[k as usize],
                 _ => DATA_LEN, // BPF_LEN: sizeof(struct seccomp_data)
             };
