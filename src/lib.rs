@@ -39,7 +39,12 @@
 //! (`check_sampled`, and run_bpf against Linux) run the build without it.
 
 mod bpf;
+pub mod compile;
+pub mod expr;
+#[cfg(kani)]
+mod proof;
 pub use bpf::{MAX_INSNS, run_bpf};
+pub use compile::compile;
 pub use libc::{seccomp_data, sock_filter};
 
 /// A policy: a function of its params (as a tuple, `Args`) returning its verdict function.

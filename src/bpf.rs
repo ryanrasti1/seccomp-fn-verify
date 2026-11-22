@@ -11,10 +11,10 @@ const fn halves(off: usize) -> (u32, u32) {
     let (lo, hi) = if cfg!(target_endian = "little") { (off, off + 4) } else { (off + 4, off) };
     (lo as u32, hi as u32)
 }
-const OFF_NR: u32 = offset_of!(libc::seccomp_data, nr) as u32;
-const OFF_ARCH: u32 = offset_of!(libc::seccomp_data, arch) as u32;
-const OFF_IP: (u32, u32) = halves(offset_of!(libc::seccomp_data, instruction_pointer));
-const fn off_arg(i: usize) -> (u32, u32) {
+pub(crate) const OFF_NR: u32 = offset_of!(libc::seccomp_data, nr) as u32;
+pub(crate) const OFF_ARCH: u32 = offset_of!(libc::seccomp_data, arch) as u32;
+pub(crate) const OFF_IP: (u32, u32) = halves(offset_of!(libc::seccomp_data, instruction_pointer));
+pub(crate) const fn off_arg(i: usize) -> (u32, u32) {
     halves(offset_of!(libc::seccomp_data, args) + i * size_of::<u64>())
 }
 const DATA_LEN: u32 = size_of::<libc::seccomp_data>() as u32;
@@ -44,56 +44,56 @@ const fn jmp(o: u32, src: u32) -> u16 {
 }
 const LD: u16 = op(BPF_LD);
 const LDX: u16 = op(BPF_LDX);
-const ST: u16 = op(BPF_ST);
-const STX: u16 = op(BPF_STX);
+pub(crate) const ST: u16 = op(BPF_ST);
+pub(crate) const STX: u16 = op(BPF_STX);
 const ALU: u16 = op(BPF_ALU);
 const JMP: u16 = op(BPF_JMP);
 const RET: u16 = op(BPF_RET);
 const X: u16 = op(BPF_X);
 const A: u16 = op(BPF_A);
-const LD_W_ABS: u16 = op(BPF_LD | BPF_W | BPF_ABS);
-const LD_W_IMM: u16 = op(BPF_LD | BPF_W | BPF_IMM);
-const LDX_W_IMM: u16 = op(BPF_LDX | BPF_W | BPF_IMM);
+pub(crate) const LD_W_ABS: u16 = op(BPF_LD | BPF_W | BPF_ABS);
+pub(crate) const LD_W_IMM: u16 = op(BPF_LD | BPF_W | BPF_IMM);
+pub(crate) const LDX_W_IMM: u16 = op(BPF_LDX | BPF_W | BPF_IMM);
 const LD_W_LEN: u16 = op(BPF_LD | BPF_W | BPF_LEN);
 const LDX_W_LEN: u16 = op(BPF_LDX | BPF_W | BPF_LEN);
-const LD_MEM: u16 = op(BPF_LD | BPF_W | BPF_MEM);
-const LDX_MEM: u16 = op(BPF_LDX | BPF_W | BPF_MEM);
+pub(crate) const LD_MEM: u16 = op(BPF_LD | BPF_W | BPF_MEM);
+pub(crate) const LDX_MEM: u16 = op(BPF_LDX | BPF_W | BPF_MEM);
 // ALU by K or X; JEQ JGT JGE JSET by K or X. (Named one by one: `check` matches them without a
 // loop, which keeps Kani's model of it small.)
-const ADD_K: u16 = alu(BPF_ADD, BPF_K);
-const SUB_K: u16 = alu(BPF_SUB, BPF_K);
-const MUL_K: u16 = alu(BPF_MUL, BPF_K);
-const OR_K: u16 = alu(BPF_OR, BPF_K);
-const AND_K: u16 = alu(BPF_AND, BPF_K);
-const XOR_K: u16 = alu(BPF_XOR, BPF_K);
-const DIV_K: u16 = alu(BPF_DIV, BPF_K);
-const LSH_K: u16 = alu(BPF_LSH, BPF_K);
-const RSH_K: u16 = alu(BPF_RSH, BPF_K);
-const ADD_X: u16 = alu(BPF_ADD, BPF_X);
-const SUB_X: u16 = alu(BPF_SUB, BPF_X);
-const MUL_X: u16 = alu(BPF_MUL, BPF_X);
-const OR_X: u16 = alu(BPF_OR, BPF_X);
-const AND_X: u16 = alu(BPF_AND, BPF_X);
-const XOR_X: u16 = alu(BPF_XOR, BPF_X);
-const DIV_X: u16 = alu(BPF_DIV, BPF_X);
-const LSH_X: u16 = alu(BPF_LSH, BPF_X);
-const RSH_X: u16 = alu(BPF_RSH, BPF_X);
+pub(crate) const ADD_K: u16 = alu(BPF_ADD, BPF_K);
+pub(crate) const SUB_K: u16 = alu(BPF_SUB, BPF_K);
+pub(crate) const MUL_K: u16 = alu(BPF_MUL, BPF_K);
+pub(crate) const OR_K: u16 = alu(BPF_OR, BPF_K);
+pub(crate) const AND_K: u16 = alu(BPF_AND, BPF_K);
+pub(crate) const XOR_K: u16 = alu(BPF_XOR, BPF_K);
+pub(crate) const DIV_K: u16 = alu(BPF_DIV, BPF_K);
+pub(crate) const LSH_K: u16 = alu(BPF_LSH, BPF_K);
+pub(crate) const RSH_K: u16 = alu(BPF_RSH, BPF_K);
+pub(crate) const ADD_X: u16 = alu(BPF_ADD, BPF_X);
+pub(crate) const SUB_X: u16 = alu(BPF_SUB, BPF_X);
+pub(crate) const MUL_X: u16 = alu(BPF_MUL, BPF_X);
+pub(crate) const OR_X: u16 = alu(BPF_OR, BPF_X);
+pub(crate) const AND_X: u16 = alu(BPF_AND, BPF_X);
+pub(crate) const XOR_X: u16 = alu(BPF_XOR, BPF_X);
+pub(crate) const DIV_X: u16 = alu(BPF_DIV, BPF_X);
+pub(crate) const LSH_X: u16 = alu(BPF_LSH, BPF_X);
+pub(crate) const RSH_X: u16 = alu(BPF_RSH, BPF_X);
 const NEG: u16 = op(BPF_ALU | BPF_NEG);
-const JA: u16 = op(BPF_JMP | BPF_JA);
-const JEQ_K: u16 = jmp(BPF_JEQ, BPF_K);
-const JGT_K: u16 = jmp(BPF_JGT, BPF_K);
-const JGE_K: u16 = jmp(BPF_JGE, BPF_K);
-const JSET_K: u16 = jmp(BPF_JSET, BPF_K);
-const JEQ_X: u16 = jmp(BPF_JEQ, BPF_X);
-const JGT_X: u16 = jmp(BPF_JGT, BPF_X);
-const JGE_X: u16 = jmp(BPF_JGE, BPF_X);
-const JSET_X: u16 = jmp(BPF_JSET, BPF_X);
-const RET_K: u16 = op(BPF_RET | BPF_K);
-const RET_A: u16 = op(BPF_RET | BPF_A);
-const TAX: u16 = op(BPF_MISC | BPF_TAX);
-const TXA: u16 = op(BPF_MISC | BPF_TXA);
+pub(crate) const JA: u16 = op(BPF_JMP | BPF_JA);
+pub(crate) const JEQ_K: u16 = jmp(BPF_JEQ, BPF_K);
+pub(crate) const JGT_K: u16 = jmp(BPF_JGT, BPF_K);
+pub(crate) const JGE_K: u16 = jmp(BPF_JGE, BPF_K);
+pub(crate) const JSET_K: u16 = jmp(BPF_JSET, BPF_K);
+pub(crate) const JEQ_X: u16 = jmp(BPF_JEQ, BPF_X);
+pub(crate) const JGT_X: u16 = jmp(BPF_JGT, BPF_X);
+pub(crate) const JGE_X: u16 = jmp(BPF_JGE, BPF_X);
+pub(crate) const JSET_X: u16 = jmp(BPF_JSET, BPF_X);
+pub(crate) const RET_K: u16 = op(BPF_RET | BPF_K);
+pub(crate) const RET_A: u16 = op(BPF_RET | BPF_A);
+pub(crate) const TAX: u16 = op(BPF_MISC | BPF_TAX);
+pub(crate) const TXA: u16 = op(BPF_MISC | BPF_TXA);
 /// Scratch memory's words (BPF_MEMWORDS).
-const MEMWORDS: usize = libc::BPF_MEMWORDS as usize;
+pub(crate) const MEMWORDS: usize = libc::BPF_MEMWORDS as usize;
 /// The kernel's limit on a program's length (BPF_MAXINSNS).
 pub const MAX_INSNS: usize = libc::BPF_MAXINSNS as usize;
 
@@ -133,20 +133,20 @@ fn run(prog: &[SockFilter], d: &SeccompData) -> u32 {
 
 /// Classic BPF's machine: the accumulator, the index register, scratch memory.
 #[derive(Clone, Copy)]
-struct State {
-    a: u32,
-    x: u32,
-    mem: [u32; MEMWORDS],
+pub(crate) struct State {
+    pub(crate) a: u32,
+    pub(crate) x: u32,
+    pub(crate) mem: [u32; MEMWORDS],
 }
 
 /// What an instruction does: on to the next one but `skip`, or the program's verdict.
-enum Step {
+pub(crate) enum Step {
     Next(usize),
     Return(u32),
 }
 
 /// One instruction, run on `s`.
-fn step(s: &mut State, SockFilter { code, jt, jf, k }: SockFilter, d: &SeccompData) -> Step {
+pub(crate) fn step(s: &mut State, SockFilter { code, jt, jf, k }: SockFilter, d: &SeccompData) -> Step {
     // the 32-bit word at `off`, by libc's layout (`check` allows only aligned words inside it,
     // each a field's or a half of one's)
     let word = |off: u32| -> u32 {
@@ -214,31 +214,12 @@ fn step(s: &mut State, SockFilter { code, jt, jf, k }: SockFilter, d: &SeccompDa
 
 /// The checks the kernel makes before it takes a program (`bpf_check_classic`,
 /// `seccomp_check_filter`'s list of opcodes): panics on the first it fails.
-fn check(prog: &[SockFilter]) {
+pub(crate) fn check(prog: &[SockFilter]) {
     assert!(!prog.is_empty() && prog.len() <= MAX_INSNS, "{} instructions", prog.len());
     let mut loads = false;
-    for (pc, &SockFilter { code, jt, jf, k }) in prog.iter().enumerate() {
-        let left = prog.len() - pc - 1;
-        let mem = (k as usize) < MEMWORDS;
-        let ok = match code {
-            // seccomp_check_filter: inside seccomp_data, aligned (every such word is a field's)
-            LD_W_ABS => k % 4 == 0 && k < DATA_LEN,
-            LD_W_IMM | LDX_W_IMM | LD_W_LEN | LDX_W_LEN => true,
-            LD_MEM | LDX_MEM => {
-                loads = true;
-                mem
-            }
-            _ if code == ST || code == STX => mem,
-            ADD_K | SUB_K | MUL_K | OR_K | AND_K | XOR_K | NEG => true,
-            ADD_X | SUB_X | MUL_X | OR_X | AND_X | XOR_X | DIV_X | LSH_X | RSH_X => true,
-            DIV_K => k != 0,
-            LSH_K | RSH_K => k < 32,
-            JA => (k as usize) < left,
-            JEQ_K | JGT_K | JGE_K | JSET_K | JEQ_X | JGT_X | JGE_X | JSET_X => (jt as usize) < left && (jf as usize) < left,
-            RET_K | RET_A | TAX | TXA => true,
-            _ => false,
-        };
-        assert!(ok, "instruction {pc} the kernel refuses: {code:#x}");
+    for (pc, &i) in prog.iter().enumerate() {
+        loads |= i.code == LD_MEM || i.code == LDX_MEM;
+        assert!(insn_ok(i, prog.len() - pc - 1), "instruction {pc} the kernel refuses: {:#x}", i.code);
     }
     let last = prog[prog.len() - 1].code;
     assert!(last == RET_K || last == RET_A, "the last instruction isn't a return");
@@ -252,6 +233,28 @@ fn check(prog: &[SockFilter]) {
     #[cfg(not(kani))]
     if loads {
         check_scratch_loads(prog);
+    }
+}
+
+/// One instruction as the kernel checks it (`bpf_check_classic`, `seccomp_check_filter`), `left`
+/// the number of instructions after it: an opcode seccomp takes, its `k` in range, its jumps
+/// inside the program. (Also the compiler's proofs' check of each template's instructions.)
+pub(crate) fn insn_ok(SockFilter { code, jt, jf, k }: SockFilter, left: usize) -> bool {
+    let mem = (k as usize) < MEMWORDS;
+    match code {
+        // seccomp_check_filter: inside seccomp_data, aligned (every such word is a field's)
+        LD_W_ABS => k % 4 == 0 && k < DATA_LEN,
+        LD_W_IMM | LDX_W_IMM | LD_W_LEN | LDX_W_LEN => true,
+        LD_MEM | LDX_MEM => mem,
+        _ if code == ST || code == STX => mem,
+        ADD_K | SUB_K | MUL_K | OR_K | AND_K | XOR_K | NEG => true,
+        ADD_X | SUB_X | MUL_X | OR_X | AND_X | XOR_X | DIV_X | LSH_X | RSH_X => true,
+        DIV_K => k != 0,
+        LSH_K | RSH_K => k < 32,
+        JA => (k as usize) < left,
+        JEQ_K | JGT_K | JGE_K | JSET_K | JEQ_X | JGT_X | JGE_X | JSET_X => (jt as usize) < left && (jf as usize) < left,
+        RET_K | RET_A | TAX | TXA => true,
+        _ => false,
     }
 }
 
