@@ -145,10 +145,13 @@ pub(crate) enum Step {
     Return(u32),
 }
 
-// `seccomp_data` as the kernel reads it: the size of 16 words (what `words` relies on), the
-// fields at these offsets (libc's).
+/// `seccomp_data`'s 32-bit words.
+const WORDS: usize = size_of::<SeccompData>() / 4;
+
+// `seccomp_data` as the kernel reads it: whole words (what `words` relies on: its size is
+// `[u32; WORDS]`'s), the fields at these offsets (libc's).
 const _: () = {
-    assert!(size_of::<SeccompData>() == size_of::<[u32; 16]>());
+    assert!(size_of::<SeccompData>() % 4 == 0);
     assert!(offset_of!(SeccompData, nr) == 0);
     assert!(offset_of!(SeccompData, arch) == 4);
     assert!(offset_of!(SeccompData, instruction_pointer) == 8);
@@ -157,11 +160,11 @@ const _: () = {
 
 /// `d` as 32-bit words: a load of `k` is word `k / 4`, as the kernel's
 /// `*(u32 *)((char *)&sd + k)`, in the native layout (the kernel's: no byte order to undo).
-fn words(d: &SeccompData) -> &[u32; 16] {
-    // SAFETY: `seccomp_data` is `repr(C)`, the size of `[u32; 16]` without padding (asserted
-    // above: its four fields end to end), aligned to 8, at least `[u32; 16]`'s 4; every bit
-    // pattern is a valid `u32`; the view borrows `d`, which outlives it.
-    unsafe { &*(d as *const SeccompData as *const [u32; 16]) }
+fn words(d: &SeccompData) -> &[u32; WORDS] {
+    // SAFETY: `seccomp_data` is `repr(C)`, whole words without padding (asserted above: its
+    // four fields end to end), so the size of `[u32; WORDS]`; aligned to 8, at least `u32`'s 4;
+    // every bit pattern is a valid `u32`; the view borrows `d`, which outlives it.
+    unsafe { &*(d as *const SeccompData as *const [u32; WORDS]) }
 }
 
 /// One instruction, run on `s`.
@@ -173,7 +176,7 @@ pub(crate) fn step(s: &mut State, SockFilter { code, jt, jf, k }: SockFilter, d:
         LD | LDX => {
             let v = match (code & MODE) as u32 {
                 BPF_IMM => k,
-                // `check` allows only aligned words inside it: `k / 4` below 16
+                // `check` allows only aligned words inside it: `k / 4` below `WORDS`
                 BPF_ABS => words(d)[(k / 4) as usize],
                 BPF_MEM => s.mem[k as usize],
                 _ => DATA_LEN, // BPF_LEN: sizeof(struct seccomp_data)
