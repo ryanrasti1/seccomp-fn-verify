@@ -1,25 +1,29 @@
 # seccomp-fn-verify
 The trusted part of seccomp-fn: a seccomp policy's tree, its meaning, and a compiler from the tree to classic BPF **proven once, for every tree** (Kani, a proof per node kind). The front end (`bpf!`, [seccomp-fn](https://github.com/ryanrasti1/seccomp-fn)) parses a policy, a plain Rust function, into the tree and refuses to compile unless the tree, printed by this crate, is the function's own tokens. No proof runs per policy. One dependency, `libc`.
 
-Its tests: `cargo test` (`tests/print.rs`, the print and the hygiene check; `tests/sampled.rs`; `tests/kernel.rs`, `run_bpf` against Linux). Its proofs: `cargo kani` (`src/proof.rs`, about 150 harnesses, each a few seconds). seccomp-fn's tests check the three agree on sampled calls: a policy's Rust function, its program by `run_bpf`, and Linux running the program. Its flake: `lib.kaniCheck`, a crate's proofs as a derivation, and `lib.kani`, Kani 0.68 built for Nix.
+Its tests: `cargo test` (`tests/print.rs`, the print and the hygiene check; `tests/sampled.rs`; `tests/kernel.rs`, `run_bpf` against Linux). Its proofs: `cargo kani` (`src/proof.rs`, 246 harnesses, and `src/tree_proof.rs`, 36, each a few seconds). seccomp-fn's tests check the three agree on sampled calls: a policy's Rust function, its program by `run_bpf`, and Linux running the program. Its flake: `lib.kaniCheck`, a crate's proofs as a derivation, and `lib.kani`, Kani 0.68 built for Nix.
 
 ## Claim & Guarantees
-For a tree `p` (`expr::Policy`) that `compile` takes (it panics on one it refuses: a nesting past the scratch memory, a shift by the width or more, a program over the kernel's limit, a tree its hygiene check refuses):
+A policy's filter, made by `filter!` from its tree (`TREE`, `seccomp_fn::tree!`'s const data), gives the policy's verdict on every call, for the params its harnesses cover:
 
-  `run_bpf(&compile(&p), &d) == p.eval(&d)`  for every `d`, and the kernel takes the program
+  `run_bpf(&filter(params), &d) == policy(params)(&d)`  for every `d`, and the kernel takes the program
 
-- `eval` (`src/expr.rs`) is the tree's meaning, a line per node that is the Rust operator itself (`Cmp(Lt, a, b) => a < b`, `And(a, b) => a && b`, a `match`'s first arm whose pattern is `d.nr as i64` and whose guard holds); a leaf (an expression without `d`: a param, a const) is its value.
-- The proof (`src/proof.rs`): each node kind's template meets its contract for every child meeting its own, the children opaque (a hole of symbolic length, value and exits), every leaf's value symbolic (so every param), every `d` and machine state symbolic; the induction to every tree is written at the file's head. No `kani::assume`.
-- That the tree is the source: `bpf!` (not trusted) round-trips it, and `print.rs` (trusted) prints a node as the construct whose meaning is its `eval`, with exactly the parentheses precedence needs, so a tree of another shape than rustc's parse of the same tokens doesn't print as them.
+It is three proofs on one tree:
+1. **The compiler, once** (`src/proof.rs`): for every tree `compile` takes, `run_bpf(&compile(&t), &d) == t.eval(&d)`; each node kind's template meets its contract for every child meeting its own (the induction at the file's head).
+2. **The tree's meaning in place, once** (`src/tree_proof.rs`): the const tree's `eval` is its built tree's (`tree.eval(p, d) == tree.build(p).eval(d)`), node kind by node kind.
+3. **The tree is the policy, per policy** (`filter!`'s check, `harnesses!`): `TREE.eval(params, d) == policy(params)(&d)` for a symbolic `d` and the params each harness gives (a few seconds each: the tcb's 54 take 1-8 s).
+
+`filter!` makes the filter (`compile(&TREE.build(params))`) and the check from one list of params, so the filter's tree is the checked one. The tree is `const` data: no code the front end emits runs in a harness (it can't `kani::assume`), and the check needs nothing of the front end to be right: a wrong tree fails it. So the front end (`seccomp_fn::tree!`), the print and the round trip (`src/print.rs`, `bpf!`'s) are not trusted: they are there for errors at compile time.
+
+**What a reviewer reads** (non-comment lines): `src/bpf.rs` (247: `run_bpf`, the kernel's checks; `tests/kernel.rs` checks it against Linux), `src/expr.rs` (201: the tree, `eval_by`, a line per node), `src/proof.rs`'s prelude and coverage list (the hole model, the contracts, the induction; `nodes!`), `src/tree_proof.rs` (147: the lemmas and their induction), and the macros of `src/tree.rs` (`filter!`, `harnesses!`, `gated!`, about 60). Proven, not read: `src/compile.rs` (453), `src/tree.rs`'s `build` and `eval` (proven equal). Not trusted: `src/print.rs` (398), seccomp-fn.
 
 The claim then rests on:
-- `run_bpf` (`src/bpf.rs`) being classic BPF as the kernel's seccomp runs it, and its checks the kernel's: checked against Linux (`tests/kernel.rs`; seccomp-fn's `tests/three_ways.rs`); the proofs run each template's instructions by its `step` and check each by its `insn_ok`
-- `eval` and the print (`src/expr.rs`, `src/print.rs`): read by eye, a line per node
-- the hygiene check (`Policy::check`): a leaf or `let` doesn't mention `d`; a closure call's body is the closure's with its parameters replaced; a pattern is a path or an integer
-- the front end's round trip, and the leaves' values being rustc's of their tokens in the policy's scope (`bpf!` binds the params in a fn item of the caller's module: nothing else in scope); a leaf being pure (it is computed once, when the filter is built)
-- the coverage list (`nodes!` in `src/proof.rs`): a `match` over every node kind with no wildcard, each kind's harnesses beside it, so a kind without them doesn't compile; and the proofs having run (`kaniCheck`'s `expectHarnesses`)
-- x86-64, little-endian: `bpf!` refuses a big-endian target
-- Toolchain correctness: `rustc`; Kani and CBMC; `libc`
+- `run_bpf` being classic BPF as the kernel's seccomp runs it, and its checks the kernel's (`tests/kernel.rs`, and seccomp-fn's three-way test)
+- `eval` (`src/expr.rs`) read by eye: only in that the compiler's proof and the per-policy check meet on it (any meaning would do, if both use it)
+- the harnesses covering the params: an enum's values are listed by the harnesses' author (`harnesses!`); integers and bools `kani::any()`
+- the policy's purity: the check calls `policy(params)(&d)` as written; a policy reading anything but its params and `d` isn't one function of them
+- the proofs having run (`kaniCheck`'s `expectHarnesses`)
+- x86-64, little-endian; Toolchain correctness: `rustc`; Kani and CBMC; `libc`
 
 ## Not guaranteed
 - **The policy is right**: the program is the function, not the policy you want.

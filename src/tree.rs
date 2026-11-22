@@ -16,6 +16,7 @@
 //! `print.rs` and `bpf!`'s, are a convenience: an error at compile time, naming the construct.)
 
 use crate::expr::*;
+use libc::seccomp_data;
 
 /// A static expression of the params, on `u64`s (a param's value `as u64`; a condition nonzero
 /// for true). Its meaning matters only in that it is a function of the params: the check
@@ -25,7 +26,7 @@ pub enum S {
     Const(u64),
     Param(u8),
     Not(&'static S),
-    Bin(SOp, &'static S, &'static S),
+    Bin(&'static (SOp, S, S)),
     /// `as u32`
     Low(&'static S),
 }
@@ -56,7 +57,7 @@ impl S {
             S::Param(i) => p[i as usize],
             S::Not(a) => (a.eval(p) == 0) as u64,
             S::Low(a) => a.eval(p) as u32 as u64,
-            S::Bin(op, a, b) => {
+            S::Bin(&(op, ref a, ref b)) => {
                 let (a, b) = (a.eval(p), b.eval(p));
                 match op {
                     SOp::Eq => (a == b) as u64,
@@ -80,48 +81,68 @@ impl S {
     }
 }
 
+// The node types: each variant one `&'static` to its payload (Kani reads a `const` enum's
+// payload as constants only when its variants share one shape: with a multi-field variant
+// beside a one-pointer one, the reads were unknown and a check took minutes, not ms).
+
 /// A value (`expr::Val`), its leaves static, each with its source.
 #[derive(Clone, Copy, Debug)]
 pub enum V {
-    Field(Field),
-    Leaf(S, &'static str),
-    Bit(BitOp, &'static V, &'static V),
-    Shift(ShiftOp, &'static V, S, &'static str),
+    Field(&'static Field),
+    Leaf(&'static (&'static S, &'static str)),
+    Bit(&'static (BitOp, V, V)),
+    Shift(&'static (ShiftOp, V, &'static S, &'static str)),
     Paren(&'static V),
-    Param(u8, &'static str),
+    Param(&'static (u8, &'static str)),
 }
 
 /// A condition (`expr::Cond`).
 #[derive(Clone, Copy, Debug)]
 pub enum C {
-    Static(S, &'static str),
-    Cmp(CmpOp, &'static V, &'static V),
-    And(&'static C, &'static C),
-    Or(&'static C, &'static C),
+    Static(&'static (&'static S, &'static str)),
+    Cmp(&'static (CmpOp, V, V)),
+    And(&'static (C, C)),
+    Or(&'static (C, C)),
     Not(&'static C),
     Paren(&'static C),
-    Let(L, &'static C),
+    Let(&'static (L, C)),
     Block(&'static C),
-    Match(Option<&'static A<C>>, &'static C),
-    Call { name: &'static str, args: &'static [&'static str], d: &'static str, body: &'static C },
-    Apply { name: &'static str, args: &'static [V], body: &'static C },
+    Match(&'static (Option<&'static A<C>>, C)),
+    Call(&'static Call),
+    Apply(&'static Apply),
+}
+
+/// `f(d, args…)`: a fn of the file, its body.
+#[derive(Clone, Copy, Debug)]
+pub struct Call {
+    pub name: &'static str,
+    pub args: &'static [&'static str],
+    pub d: &'static str,
+    pub body: C,
+}
+
+/// `g(args…)`: a closure's call, its body.
+#[derive(Clone, Copy, Debug)]
+pub struct Apply {
+    pub name: &'static str,
+    pub args: &'static [V],
+    pub body: C,
 }
 
 /// A statement (`expr::Stmt`).
 #[derive(Clone, Copy, Debug)]
 pub enum T {
-    Verdict(S, &'static str),
-    Return(S, &'static str),
-    Let(L, &'static T),
-    If(&'static C, &'static T, &'static T),
-    IfThen(&'static C, &'static T, &'static T),
-    Match(Option<&'static A<T>>, &'static T),
+    Verdict(&'static (&'static S, &'static str)),
+    Return(&'static (&'static S, &'static str)),
+    Let(&'static (L, T)),
+    If(&'static (C, T, T)),
+    IfThen(&'static (C, T, T)),
+    Match(&'static (Option<&'static A<T>>, T)),
     Block(&'static T),
 }
 
 /// A `match`'s arms, a list: an arm (its patterns, guard, body), then the next. (Lists, not
-/// slices: Kani reads a large `const` array's elements as unknown, a small allocation's as
-/// constants, so each node is its own.)
+/// slices: Kani reads a large `const` array's elements as unknown, so each node is its own.)
 #[derive(Clone, Copy, Debug)]
 pub struct A<B: 'static> {
     pub pats: &'static P,
@@ -140,8 +161,15 @@ pub struct P {
 
 #[derive(Clone, Copy, Debug)]
 pub enum L {
-    Plain(&'static str),
-    Closure { name: &'static str, params: &'static [(&'static str, &'static str)], body: &'static C },
+    Plain(&'static &'static str),
+    Closure(&'static Closure),
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Closure {
+    pub name: &'static str,
+    pub params: &'static [(&'static str, &'static str)],
+    pub body: C,
 }
 
 /// A policy's tree: `d`'s name, the body.
@@ -158,41 +186,26 @@ impl Tree {
     }
 }
 
-/// The combinator as `const` data (`expr::gated`): the ABI and gate checks, then `core` or a
-/// sub-filter (each a condition: it can only allow, or not), leaves static.
-#[derive(Clone, Copy, Debug)]
-pub struct Gated {
-    pub arch: S,
-    pub gate: S,
-    pub core: &'static C,
-    pub subs: &'static [&'static C],
-}
-
-impl Gated {
-    pub fn build(&self, p: &[u64]) -> Policy {
-        gated(self.arch.eval(p) as u32, self.gate.eval(p), c(self.core, p), self.subs.iter().map(|s| c(s, p)).collect())
-    }
-}
-
 fn leaf<X>(value: X, src: &'static str) -> Leaf<X> {
     Leaf { value, src }
 }
 
-fn v(x: &V, p: &[u64]) -> Val {
+pub(crate) fn v(x: &V, p: &[u64]) -> Val {
+    let bv = |x: &V| Box::new(v(x, p));
     match *x {
-        V::Field(f) => Val::Field(f),
-        V::Leaf(s, src) => Val::Const(leaf(s.eval(p), src)),
-        V::Bit(op, a, b) => Val::Bit(op, Box::new(v(a, p)), Box::new(v(b, p))),
-        V::Shift(op, a, s, src) => Val::Shift(op, Box::new(v(a, p)), leaf(s.eval(p) as u32, src)),
-        V::Paren(a) => Val::Paren(Box::new(v(a, p))),
-        V::Param(i, name) => Val::Param(i, name),
+        V::Field(f) => Val::Field(*f),
+        V::Leaf(&(s, src)) => Val::Const(leaf(s.eval(p), src)),
+        V::Bit((op, a, b)) => Val::Bit(*op, bv(a), bv(b)),
+        V::Shift((op, a, s, src)) => Val::Shift(*op, bv(a), leaf(s.eval(p) as u32, src)),
+        V::Paren(a) => Val::Paren(bv(a)),
+        V::Param(&(i, name)) => Val::Param(i, name),
     }
 }
 
 fn l(x: &L, p: &[u64]) -> Let {
     match *x {
         L::Plain(src) => Let::Plain(src),
-        L::Closure { name, params, body } => Let::Closure { name, params: params.to_vec(), body: Box::new(c(body, p)) },
+        L::Closure(k) => Let::Closure { name: k.name, params: k.params.to_vec(), body: Box::new(c(&k.body, p)) },
     }
 }
 
@@ -210,34 +223,132 @@ fn arms<B, X>(mut a: Option<&A<B>>, p: &[u64], b: impl Fn(&B) -> X) -> Vec<Arm<X
     v
 }
 
-fn c(x: &C, p: &[u64]) -> Cond {
+pub(crate) fn c(x: &C, p: &[u64]) -> Cond {
     let bc = |x: &C| Box::new(c(x, p));
     match *x {
-        C::Static(s, src) => Cond::Static(leaf(s.eval(p) != 0, src)),
-        C::Cmp(op, a, b) => Cond::Cmp(op, Box::new(v(a, p)), Box::new(v(b, p))),
-        C::And(a, b) => Cond::And(bc(a), bc(b)),
-        C::Or(a, b) => Cond::Or(bc(a), bc(b)),
+        C::Static(&(s, src)) => Cond::Static(leaf(s.eval(p) != 0, src)),
+        C::Cmp((op, a, b)) => Cond::Cmp(*op, Box::new(v(a, p)), Box::new(v(b, p))),
+        C::And((a, b)) => Cond::And(bc(a), bc(b)),
+        C::Or((a, b)) => Cond::Or(bc(a), bc(b)),
         C::Not(a) => Cond::Not(bc(a)),
         C::Paren(a) => Cond::Paren(bc(a)),
-        C::Let(ref x, a) => Cond::Let(l(x, p), bc(a)),
+        C::Let((x, a)) => Cond::Let(l(x, p), bc(a)),
         C::Block(a) => Cond::Block(bc(a)),
-        C::Match(a, d) => Cond::Match(arms(a, p, |b| c(b, p)), bc(d)),
-        C::Call { name, args, d, body } => Cond::Call { name, args: args.to_vec(), d, body: bc(body) },
-        C::Apply { name, args, body } => Cond::Apply { name, args: args.iter().map(|a| v(a, p)).collect(), body: bc(body) },
+        C::Match((a, d)) => Cond::Match(arms(*a, p, |b| c(b, p)), bc(d)),
+        C::Call(k) => Cond::Call { name: k.name, args: k.args.to_vec(), d: k.d, body: bc(&k.body) },
+        C::Apply(k) => Cond::Apply { name: k.name, args: k.args.iter().map(|a| v(a, p)).collect(), body: bc(&k.body) },
     }
 }
 
-fn t(x: &T, p: &[u64]) -> Stmt {
+pub(crate) fn t(x: &T, p: &[u64]) -> Stmt {
     let bt = |x: &T| Box::new(t(x, p));
     match *x {
-        T::Verdict(s, src) => Stmt::Verdict(leaf(s.eval(p) as u32, src)),
-        T::Return(s, src) => Stmt::Return(leaf(s.eval(p) as u32, src)),
-        T::Let(ref x, a) => Stmt::Let(l(x, p), bt(a)),
-        T::If(k, a, b) => Stmt::If(c(k, p), bt(a), bt(b)),
-        T::IfThen(k, a, b) => Stmt::IfThen(c(k, p), bt(a), bt(b)),
-        T::Match(a, d) => Stmt::Match(arms(a, p, |b| t(b, p)), bt(d)),
+        T::Verdict(&(s, src)) => Stmt::Verdict(leaf(s.eval(p) as u32, src)),
+        T::Return(&(s, src)) => Stmt::Return(leaf(s.eval(p) as u32, src)),
+        T::Let((x, a)) => Stmt::Let(l(x, p), bt(a)),
+        T::If((k, a, b)) => Stmt::If(c(k, p), bt(a), bt(b)),
+        T::IfThen((k, a, b)) => Stmt::IfThen(c(k, p), bt(a), bt(b)),
+        T::Match((a, d)) => Stmt::Match(arms(*a, p, |b| t(b, p)), bt(d)),
         T::Block(a) => Stmt::Block(bt(a)),
     }
+}
+
+// ---- the tree's meaning, read in place (no tree built: Kani's heap is slow) ----
+// Each node's line is `expr.rs`'s line for the node `build` makes of it; `tree_proof.rs`
+// proves the two equal, node kind by node kind (`eval_t(x) == build(x).eval()`).
+
+impl Tree {
+    /// `build(p)`'s `eval` on `d`, read in place.
+    pub fn eval(&self, p: &[u64], d: &seccomp_data) -> u32 {
+        eval_t(&self.body, p, d)
+    }
+}
+
+pub fn eval_v(x: &V, p: &[u64], d: &seccomp_data) -> u64 {
+    match *x {
+        V::Field(f) => f.eval(d),
+        V::Leaf(&(s, _)) => s.eval(p),
+        V::Bit((BitOp::And, a, b)) => eval_v(a, p, d) & eval_v(b, p, d),
+        V::Bit((BitOp::Or, a, b)) => eval_v(a, p, d) | eval_v(b, p, d),
+        V::Shift((op, a, k, _)) => {
+            let (va, k) = (eval_v(a, p, d), k.eval(p) as u32);
+            if !wide_v(a) {
+                (match op {
+                    ShiftOp::Shl => (va as u32) << k,
+                    ShiftOp::Shr => (va as u32) >> k,
+                }) as u64
+            } else {
+                match op {
+                    ShiftOp::Shl => va << k,
+                    ShiftOp::Shr => va >> k,
+                }
+            }
+        }
+        V::Paren(a) => eval_v(a, p, d),
+        V::Param(_) => panic!("a closure's parameter outside its closure"),
+    }
+}
+
+/// `Val::wide` of `build`'s value.
+pub fn wide_v(x: &V) -> bool {
+    match *x {
+        V::Field(f) => f.wide(),
+        V::Leaf(_) => true,
+        V::Bit((_, a, b)) => match a {
+            V::Leaf(_) => wide_v(b),
+            _ => wide_v(a),
+        },
+        V::Shift((_, a, _, _)) | V::Paren(a) => wide_v(a),
+        V::Param(_) => true,
+    }
+}
+
+pub fn eval_c(x: &C, p: &[u64], d: &seccomp_data) -> bool {
+    match *x {
+        C::Static(&(s, _)) => s.eval(p) != 0,
+        C::Cmp((op, a, b)) => op.holds(eval_v(a, p, d), eval_v(b, p, d)),
+        C::And((a, b)) => eval_c(a, p, d) && eval_c(b, p, d),
+        C::Or((a, b)) => eval_c(a, p, d) || eval_c(b, p, d),
+        C::Not(a) => !eval_c(a, p, d),
+        C::Paren(a) | C::Block(a) | C::Let((_, a)) => eval_c(a, p, d),
+        C::Match((arms, default)) => eval_arms(*arms, p, d, |b| eval_c(b, p, d), || eval_c(default, p, d)),
+        C::Call(k) => eval_c(&k.body, p, d),
+        C::Apply(k) => eval_c(&k.body, p, d),
+    }
+}
+
+pub fn eval_t(x: &T, p: &[u64], d: &seccomp_data) -> u32 {
+    match *x {
+        T::Verdict(&(s, _)) | T::Return(&(s, _)) => s.eval(p) as u32,
+        T::Let((_, a)) | T::Block(a) => eval_t(a, p, d),
+        T::If((k, a, b)) | T::IfThen((k, a, b)) => {
+            if eval_c(k, p, d) {
+                eval_t(a, p, d)
+            } else {
+                eval_t(b, p, d)
+            }
+        }
+        T::Match((arms, default)) => eval_arms(*arms, p, d, |b| eval_t(b, p, d), || eval_t(default, p, d)),
+    }
+}
+
+/// A `match`: the body (by `body`) of the first arm whose pattern is `d.nr as i64` and whose
+/// guard holds, else the default's. (The body is evaluated where its arm is: an arm chosen by a
+/// symbolic call, returned, would be an unknown node to Kani.)
+pub fn eval_arms<B, X>(mut a: Option<&'static A<B>>, p: &[u64], d: &seccomp_data, body: impl Fn(&B) -> X, default: impl FnOnce() -> X) -> X {
+    while let Some(x) = a {
+        let mut q = Some(x.pats);
+        let mut hit = false;
+        while let Some(y) = q {
+            hit |= d.nr as i64 == y.value;
+            q = y.next;
+        }
+        if hit && x.guard.is_none_or(|g| eval_c(g, p, d)) {
+            return body(&x.body);
+        }
+        a = x.next;
+    }
+    default()
 }
 
 /// A symbolic call, every field `kani::any()`; its number `nr` if given (a harness per number
@@ -274,10 +385,8 @@ macro_rules! filter {
         #[allow(dead_code)]
         $vis fn $check(nr: ::core::option::Option<i32>, $($p: $t),*) {
             let d = $crate::tree::any_data(nr);
-            let tree = $tree.build(&[$($p as u64),*]);
-            assert!(tree.eval(&d) == $policy($($p),*)(&d), "the tree isn't the policy");
-            // (no drop: a tree's drop glue is recursive, and Kani would unwind it)
-            ::core::mem::forget(tree);
+            // the tree's `eval` read in place (`build`'s, by `tree_proof.rs`)
+            assert!($tree.eval(&[$($p as u64),*], &d) == $policy($($p),*)(&d), "the tree isn't the policy");
         }
     };
 }
@@ -305,4 +414,52 @@ macro_rules! harnesses {
             }
         )*
     };
+}
+
+/// The combinator: a filter of rows as a [`Tree`], each sub-filter a condition (it can only
+/// allow, or not, never change the checks before it). Another ABI (an arch but `arch`, or the
+/// x32 bit): KILL_PROCESS; a call not from `gate`: TRAP; then ALLOW if `core` or a sub holds,
+/// else KILL_PROCESS. `arch` and `gate` are static expressions ([`S`]), the rest conditions
+/// ([`C`]); the tree is the source
+///
+/// ```text
+/// if d.arch != arch || d.nr as u32 >= X32_SYSCALL_BIT { return SECCOMP_RET_KILL_PROCESS; }
+/// if d.instruction_pointer != gate { return SECCOMP_RET_TRAP; }
+/// if core || sub… { SECCOMP_RET_ALLOW } else { SECCOMP_RET_KILL_PROCESS }
+/// ```
+///
+/// (A tree of the usual nodes: the compiler's proof and the tree's cover it.)
+#[macro_export]
+macro_rules! gated {
+    (arch = $arch:expr, gate = $gate:expr, core = $core:expr, subs = [$($sub:expr),* $(,)?] $(,)?) => {{
+        use $crate::expr::{CmpOp, Field};
+        use $crate::tree::{C, S, T, Tree, V};
+        Tree {
+            d: "d",
+            body: T::IfThen(&(
+                C::Or(&(
+                    C::Cmp(&(CmpOp::Ne, V::Field(&Field::Arch), V::Leaf(&(&$arch, "arch")))),
+                    C::Cmp(&(CmpOp::Ge, V::Field(&Field::Nr), V::Leaf(&(&S::Const(0x4000_0000), "X32_SYSCALL_BIT")))),
+                )),
+                T::Return(&(&S::Const($crate::verdicts::KILL), "SECCOMP_RET_KILL_PROCESS")),
+                T::IfThen(&(
+                    C::Cmp(&(CmpOp::Ne, V::Field(&Field::Ip), V::Leaf(&(&$gate, "gate")))),
+                    T::Return(&(&S::Const($crate::verdicts::TRAP), "SECCOMP_RET_TRAP")),
+                    T::If(&(
+                        $crate::__or!($core $(, $sub)*),
+                        T::Verdict(&(&S::Const($crate::verdicts::ALLOW), "SECCOMP_RET_ALLOW")),
+                        T::Verdict(&(&S::Const($crate::verdicts::KILL), "SECCOMP_RET_KILL_PROCESS")),
+                    )),
+                )),
+            )),
+        }
+    }};
+}
+
+/// `a || b || …`, left to right (`gated!`'s rows).
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __or {
+    ($a:expr) => { $a };
+    ($a:expr, $b:expr $(, $rest:expr)*) => { $crate::__or!($crate::tree::C::Or(&($a, $b)) $(, $rest)*) };
 }

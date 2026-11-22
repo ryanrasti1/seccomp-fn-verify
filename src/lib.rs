@@ -26,9 +26,19 @@ pub mod print;
 pub mod tree;
 #[cfg(kani)]
 mod proof;
+#[cfg(kani)]
+mod tree_proof;
 pub use bpf::{MAX_INSNS, run_bpf};
 pub use compile::compile;
 pub use libc::{seccomp_data, sock_filter};
+
+/// The verdicts `gated!` returns, libc's, as `u64` leaves.
+#[doc(hidden)]
+pub mod verdicts {
+    pub const KILL: u64 = libc::SECCOMP_RET_KILL_PROCESS as u64;
+    pub const TRAP: u64 = libc::SECCOMP_RET_TRAP as u64;
+    pub const ALLOW: u64 = libc::SECCOMP_RET_ALLOW as u64;
+}
 
 /// A policy: a function of its params (as a tuple, `Args`) returning its verdict function.
 pub trait Policy<Args> {

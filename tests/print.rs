@@ -100,3 +100,13 @@ fn harness_list() {
     let file: Vec<String> = include_str!("../src/proof-harnesses").lines().map(String::from).collect();
     assert_eq!(names, file, "regenerate src/proof-harnesses from nodes!");
 }
+
+/// `src/tree-proof-harnesses` is `lemma!`'s list in `src/tree_proof.rs`.
+#[test]
+fn tree_harness_list() {
+    let src = include_str!("../src/tree_proof.rs");
+    let list = &src[src.find("lemma! {").unwrap()..];
+    let names: Vec<&str> = list.lines().filter_map(|l| l.strip_prefix("    ")?.split_once(" =>").map(|(n, _)| n)).filter(|n| n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')).collect();
+    let file: Vec<&str> = include_str!("../src/tree-proof-harnesses").lines().collect();
+    assert_eq!(names, file, "regenerate src/tree-proof-harnesses from lemma!");
+}

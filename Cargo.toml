@@ -1,6 +1,6 @@
 [package]
 name = "seccomp-fn-verify"
-description = "The proof that a seccomp policy's program is the policy: classic BPF as the kernel runs it, and the Kani harness (the only part of seccomp-fn to review)"
+description = "The trusted part of seccomp-fn: the tree, its meaning, the compiler proven once, and the check that a policy is its tree"
 version = "0.0.0"
 edition = "2024"
 rust-version = "1.88"
@@ -9,11 +9,6 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 # seccomp_data, sock_filter, the opcodes
 libc = "0.2"
-
-[dev-dependencies]
-# The compiler, only to make the kernel test's inputs (tests/policies): what is checked is
-# run_bpf, against Linux. Not a dependency of the crate.
-seccomp-fn = { git = "ssh://git@github.com/ryanrasti1/seccomp-fn.git", rev = "874f736193d1c08db8b6afb3d133ad2a22362faf" }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }

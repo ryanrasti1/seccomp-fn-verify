@@ -140,14 +140,17 @@
 
       checks.${system} = {
         # The compiler's proofs (src/proof.rs), every harness of its coverage list
-        # (src/proof-harnesses, which tests/print.rs keeps equal to it).
+        # (src/proof-harnesses, which tests/print.rs keeps equal to it), and the tree's lemmas
+        # (src/tree_proof.rs; src/tree-proof-harnesses, the same).
         kani = kaniCheck {
           name = "seccomp-fn-verify-proofs";
           inherit src;
           cargoLock = ./Cargo.lock;
           runs = [ [ "-j" "2" "--output-format=terse" "--no-assertion-reach-checks" ] ];
-          expectHarnesses = map (h: "proof::${h}")
-            (pkgs.lib.filter (h: h != "") (pkgs.lib.splitString "\n" (builtins.readFile ./src/proof-harnesses)));
+          expectHarnesses =
+            let names = f: pkgs.lib.filter (h: h != "") (pkgs.lib.splitString "\n" (builtins.readFile f));
+            in map (h: "proof::${h}") (names ./src/proof-harnesses)
+              ++ map (h: "tree_proof::${h}") (names ./src/tree-proof-harnesses);
         };
         # The tests: run_bpf sampled, and against the build machine's kernel.
         tests = pkgs.rustPlatform.buildRustPackage {

@@ -11,11 +11,9 @@
 //! as numbers on purpose, from the kernel's documentation: independent of the library's
 //! constants, so that a layout both the library and the macro got wrong shows here.
 
-// The example policies' programs (seccomp-fn's `bpf!`: a dev-dependency, only for inputs
-// here; what is checked is `run_bpf`, against the kernel). `tests/policies` is a copy of
-// seccomp-fn's `examples/policies.rs`: `bpf!` reads its call's own file, so it is here.
-mod policies;
-use policies::*;
+// (The example policies' programs against Linux are seccomp-fn's tests, `tests/kernel.rs`
+// and `tests/three_ways.rs`: this crate depends on nothing of seccomp-fn's.)
+use libc::{SECCOMP_RET_ALLOW, SECCOMP_RET_ERRNO, SECCOMP_RET_KILL_PROCESS, SECCOMP_RET_TRAP, seccomp_data, sock_filter};
 use seccomp_fn_verify::run_bpf;
 
 type SockFilter = sock_filter;
@@ -48,24 +46,11 @@ std::arch::global_asm!(
     ".globl seccomp_fn_probe_ip",
     "seccomp_fn_probe_ip:",
     "ret",
-    // the i386 ABI's entry, from this x86-64 process: seccomp sees AUDIT_ARCH_I386
-    ".globl seccomp_fn_probe80",
-    "seccomp_fn_probe80:",
-    "push rbx",
-    "mov eax, edi",
-    "xor ebx, ebx",
-    "int 0x80",
-    ".globl seccomp_fn_probe80_ip",
-    "seccomp_fn_probe80_ip:",
-    "pop rbx",
-    "ret",
 );
 
 unsafe extern "C" {
     fn seccomp_fn_probe(nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64;
     static seccomp_fn_probe_ip: u8;
-    fn seccomp_fn_probe80(nr: u64) -> i64;
-    static seccomp_fn_probe80_ip: u8;
 }
 
 /// The instruction pointer seccomp sees for a probe: just past its `syscall`.
@@ -73,12 +58,8 @@ fn probe_ip() -> u64 {
     &raw const seccomp_fn_probe_ip as u64
 }
 
-fn probe80_ip() -> u64 {
-    &raw const seccomp_fn_probe80_ip as u64
-}
-
-/// include/uapi/linux/audit.h: `EM_386 | __AUDIT_ARCH_LE`.
-const AUDIT_ARCH_I386: u32 = libc::EM_386 as u32 | 0x4000_0000;
+/// `EM_X86_64 | __AUDIT_ARCH_64BIT | __AUDIT_ARCH_LE`.
+const AUDIT_ARCH_X86_64: u32 = libc::EM_X86_64 as u32 | 0x8000_0000 | 0x4000_0000;
 
 /// What a call came to, as the parent sees it.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -119,11 +100,7 @@ fn kernel(prog: &[SockFilter], d: &SeccompData) -> Outcome {
                 libc::_exit(201);
             }
             let a = d.args;
-            let r = if d.arch == AUDIT_ARCH_I386 {
-                seccomp_fn_probe80(d.nr as u32 as u64)
-            } else {
-                seccomp_fn_probe(d.nr as u32 as u64, a[0], a[1], a[2], a[3], a[4], a[5])
-            };
+            let r = seccomp_fn_probe(d.nr as u32 as u64, a[0], a[1], a[2], a[3], a[4], a[5]);
             // an allowed exit doesn't return; anything else is an errno (or a success)
             libc::_exit(if r < 0 { (-r).min(199) as i32 } else { 0 })
         },
@@ -170,52 +147,6 @@ fn same(prog: &[SockFilter], calls: &[(u32, [u64; 6])]) {
 /// An unassigned number: allowed, it fails with ENOSYS.
 const NONE: u32 = 999;
 
-#[test]
-fn compares_as_linux() {
-    let calls: Vec<(u32, [u64; 6])> = [
-        [5, 9, 5, 0, 8, 0],
-        [5, 9, 7, 7, 100, 0],
-        [4, 9, 9, 8, 100, 0],
-        [0, 0, 10, 0, 0, 0],
-        [0, 0, 6, 0, 3, 1],
-        [0, 0, 6, 1 << 32, 3, 0],
-        [u64::MAX; 6],
-    ]
-    .iter()
-    .flat_map(|&a| [(NONE, a), (1001, a)])
-    .collect();
-    for level in [Level::Low, Level::High] {
-        for strict in [false, true] {
-            same(&compares::filter(5, 9, strict, level), &calls);
-        }
-    }
-}
-
-#[test]
-fn table_as_linux() {
-    // the pid nobody has; `kill` to it fails with ESRCH; fds that aren't open
-    let pid = 0x7fff_fff0u64;
-    let mut calls = vec![];
-    for nr in [SYS_read, SYS_write, SYS_kill, SYS_exit, SYS_exit_group, 1000, 1001].map(|n| n as u32) {
-        for a0 in [pid, pid + 1, u64::MAX] {
-            for a1 in [0, 1, 9, 64, 65] {
-                calls.push((nr, [a0, a1, 0, 0, 0, 0]));
-            }
-        }
-    }
-    for allow_exit in [false, true] {
-        same(&table::filter(pid, allow_exit), &calls);
-        // the instruction pointer's row: the probe's
-        same(&table::filter(probe_ip(), allow_exit), &[(1000, [0; 6])]);
-    }
-}
-
-#[test]
-fn long_as_linux() {
-    let calls = [(NONE, [11, 10, 11, 9, 10, 0]), (NONE, [11, 10, 11, 9, 11, 0]), (NONE, [10, 10, 11, 9, 10, 0]), (2000, [11, 10, 11, 9, 10, 0])];
-    same(&long::filter(11), &calls);
-}
-
 /// The opcodes the macro doesn't emit: ALU, X, scratch memory, RET A, JSET.
 #[test]
 fn alu_as_linux() {
@@ -240,65 +171,10 @@ fn alu_as_linux() {
     same(&prog, &calls);
 }
 
-#[test]
-fn guarded_as_linux() {
-    let pid = 0x7fff_fff0u64;
-    let mut calls = vec![];
-    for nr in [SYS_read as u32, SYS_kill as u32, 1000, 1001, NONE] {
-        for a0 in [pid, 2, 3] {
-            for a1 in [0, 9, 65] {
-                for a2 in [0, 6] {
-                    for a5 in [0, 7] {
-                        calls.push((nr, [a0, a1, a2, 0, 0, a5]));
-                    }
-                }
-            }
-        }
-    }
-    for on in [false, true] {
-        same(&guarded::filter(pid, on), &calls);
-    }
-}
-
 /// Values whose halves differ, in every 64-bit field, against `==`, `<` and `<=` on each:
 /// a wrong offset or a swapped half gives another verdict than the kernel's.
-#[test]
-fn halves_as_linux() {
-    let vals = [0xaaaa_aaaa_0000_0005u64, 0x0000_0005_aaaa_aaaa, 0x1_0000_0000, u64::MAX, 5, 0xaaaa_aaaa_0000_0004, 0xaaaa_aaa9_0000_0005];
-    for v in [0xaaaa_aaaa_0000_0005u64, 0x0000_0005_aaaa_aaaa] {
-        let mut calls = vec![];
-        for i in 0..6 {
-            for &x in &vals {
-                // the earlier arguments at v's maximum, past every test of theirs
-                let mut args = [u64::MAX; 6];
-                args[i] = x;
-                calls.push((NONE, args));
-            }
-        }
-        same(&halves::filter(v, 0), &calls);
-    }
-    // the instruction pointer: v around the probe's
-    let ip = probe_ip();
-    for v in [ip, ip + 1, ip - 1, ip ^ (1 << 32), ip ^ 1 ^ (1 << 32), ip.rotate_left(32)] {
-        same(&halves::filter(v, 0), &[(NONE, [u64::MAX; 6])]);
-    }
-    // nr: at, under and over w
-    for nr in [997, 998, 999, 1000, 1001] {
-        same(&halves::filter(0, 999), &[(nr, [u64::MAX; 6])]);
-    }
-}
-
 /// The two constants libc lacks, against the kernel: another arch (the i386 entry) and the x32
 /// bit are killed, an x86-64 call isn't.
-#[test]
-fn abi_as_linux() {
-    same(&abi::filter(), &[(NONE, [0; 6]), (X32_SYSCALL_BIT | NONE, [0; 6]), (X32_SYSCALL_BIT, [0; 6]), (u32::MAX, [0; 6])]);
-    let p = behind_prefix(&abi::filter(), probe80_ip());
-    let d = SeccompData { nr: 20, arch: AUDIT_ARCH_I386, instruction_pointer: probe80_ip(), args: [0; 6] };
-    assert_eq!(run_bpf(&p, &d), SECCOMP_RET_KILL_PROCESS);
-    assert_eq!(kernel(&p, &d), Outcome::Killed);
-}
-
 /// Operand values at the edges: 0, 1, around a shift's width, the sign bit, all ones, and one
 /// whose nibbles all differ.
 const EDGES: [u32; 8] = [0, 1, 31, 32, 33, 0x8000_0000, 0xffff_ffff, 0x1234_5678];

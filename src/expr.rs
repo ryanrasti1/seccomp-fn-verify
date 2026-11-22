@@ -290,35 +290,3 @@ impl Policy {
         self.body.eval(d)
     }
 }
-
-/// The combinator: a filter of rows, each sub-filter a condition (its rows: it can only allow, or
-/// not, never change the checks before it). Another ABI (an arch but `arch`, or the x32 bit):
-/// KILL_PROCESS; a call not from `gate`: TRAP; then ALLOW if `core` or a sub holds, else
-/// KILL_PROCESS. Nodes of the tree, so the compiler's proof covers it: its print is
-///
-/// ```text
-/// if d.arch != arch || d.nr as u32 >= X32_SYSCALL_BIT { return SECCOMP_RET_KILL_PROCESS; }
-/// if d.instruction_pointer != gate { return SECCOMP_RET_TRAP; }
-/// if core || sub… { SECCOMP_RET_ALLOW } else { SECCOMP_RET_KILL_PROCESS }
-/// ```
-pub fn gated(arch: u32, gate: u64, core: Cond, subs: Vec<Cond>) -> Policy {
-    let leaf = |value: u64, src| Box::new(Val::Const(Leaf { value, src }));
-    let verdict = |value, src| Leaf { value, src };
-    let abi = Cond::Or(
-        Box::new(Cond::Cmp(CmpOp::Ne, Box::new(Val::Field(Field::Arch)), leaf(arch as u64, "arch"))),
-        Box::new(Cond::Cmp(CmpOp::Ge, Box::new(Val::Field(Field::Nr)), leaf(0x4000_0000, "X32_SYSCALL_BIT"))),
-    );
-    let not_gate = Cond::Cmp(CmpOp::Ne, Box::new(Val::Field(Field::Ip)), leaf(gate, "gate"));
-    let rows = subs.into_iter().fold(core, |acc, s| Cond::Or(Box::new(acc), Box::new(s)));
-    let kill = verdict(libc::SECCOMP_RET_KILL_PROCESS, "SECCOMP_RET_KILL_PROCESS");
-    let body = Stmt::IfThen(
-        abi,
-        Box::new(Stmt::Return(kill)),
-        Box::new(Stmt::IfThen(
-            not_gate,
-            Box::new(Stmt::Return(verdict(libc::SECCOMP_RET_TRAP, "SECCOMP_RET_TRAP"))),
-            Box::new(Stmt::If(rows, Box::new(Stmt::Verdict(verdict(libc::SECCOMP_RET_ALLOW, "SECCOMP_RET_ALLOW"))), Box::new(Stmt::Verdict(kill)))),
-        )),
-    );
-    Policy { d: "d", body }
-}

@@ -28,6 +28,7 @@ const OP: u16 = 0xf0;
 const SRC: u16 = 0x08;
 const RVAL: u16 = 0x18;
 const MISCOP: u16 = 0xf8;
+const SIZE: u16 = 0x18;
 use libc::{
     BPF_A, BPF_ABS, BPF_ADD, BPF_ALU, BPF_AND, BPF_DIV, BPF_IMM, BPF_JA, BPF_JEQ, BPF_JGE, BPF_JGT, BPF_JMP, BPF_JSET,
     BPF_K, BPF_LD, BPF_LDX, BPF_LEN, BPF_LSH, BPF_MEM, BPF_MISC, BPF_MUL, BPF_NEG, BPF_OR, BPF_RET, BPF_RSH, BPF_ST,
@@ -43,6 +44,9 @@ const fn jmp(o: u32, src: u32) -> u16 {
     op(BPF_JMP | o | src)
 }
 const LD: u16 = op(BPF_LD);
+const MISC: u16 = op(BPF_MISC);
+/// RET's source K (`BPF_K`).
+const K_RVAL: u16 = op(BPF_K);
 const LDX: u16 = op(BPF_LDX);
 pub(crate) const ST: u16 = op(BPF_ST);
 pub(crate) const STX: u16 = op(BPF_STX);
@@ -169,17 +173,22 @@ fn words(d: &SeccompData) -> &[u32; WORDS] {
 
 /// One instruction, run on `s`.
 pub(crate) fn step(s: &mut State, SockFilter { code, jt, jf, k }: SockFilter, d: &SeccompData) -> Step {
-    // the 32-bit word at `off`, by libc's layout (`check` allows only aligned words inside it,
-    // each a field's or a half of one's)
-    let src = if code & SRC == X { s.x } else { k };
+    // Every case `check` admits is named; anything else is unreachable (in a proof, an assertion
+    // each node's harness proves never fails).
+    let src = match code & SRC {
+        X => s.x,
+        _ => k, // BPF_K (0)
+    };
     match code & CLASS {
         LD | LDX => {
+            assert!((code & SIZE) as u32 == BPF_W, "check() admits only word loads");
             let v = match (code & MODE) as u32 {
                 BPF_IMM => k,
                 // `check` allows only aligned words inside it: `k / 4` below `WORDS`
                 BPF_ABS => words(d)[(k / 4) as usize],
                 BPF_MEM => s.mem[k as usize],
-                _ => DATA_LEN, // BPF_LEN: sizeof(struct seccomp_data)
+                BPF_LEN => DATA_LEN, // sizeof(struct seccomp_data)
+                _ => unreachable!("check() admits only IMM, ABS, MEM and LEN loads"),
             };
             if code & CLASS == LD { s.a = v } else { s.x = v }
         }
@@ -199,7 +208,8 @@ pub(crate) fn step(s: &mut State, SockFilter { code, jt, jf, k }: SockFilter, d:
                 BPF_LSH => s.a.wrapping_shl(src),
                 BPF_RSH => s.a.wrapping_shr(src),
                 BPF_NEG => s.a.wrapping_neg(),
-                _ => s.a ^ src, // BPF_XOR
+                BPF_XOR => s.a ^ src,
+                _ => unreachable!("check() admits only ADD, SUB, MUL, DIV, OR, AND, LSH, RSH, NEG, XOR"),
             }
         }
         JMP => {
@@ -210,15 +220,27 @@ pub(crate) fn step(s: &mut State, SockFilter { code, jt, jf, k }: SockFilter, d:
                         BPF_JEQ => s.a == src,
                         BPF_JGT => s.a > src,
                         BPF_JGE => s.a >= src,
-                        _ => s.a & src != 0, // BPF_JSET
+                        BPF_JSET => s.a & src != 0,
+                        _ => unreachable!("check() admits only JA, JEQ, JGT, JGE, JSET"),
                     };
                     (if taken { jt } else { jf }) as usize
                 }
             };
             return Step::Next(skip);
         }
-        RET => return Step::Return(if code & RVAL == A { s.a } else { k }),
-        _ => if (code & MISCOP) as u32 == BPF_TAX { s.x = s.a } else { s.a = s.x },
+        RET => {
+            return Step::Return(match code & RVAL {
+                A => s.a,
+                K_RVAL => k,
+                _ => unreachable!("check() admits only RET K and RET A"),
+            });
+        }
+        MISC => match (code & MISCOP) as u32 {
+            BPF_TAX => s.x = s.a,
+            BPF_TXA => s.a = s.x,
+            _ => unreachable!("check() admits only TAX and TXA"),
+        },
+        _ => unreachable!("check() admits no other class"),
     }
     Step::Next(0)
 }
@@ -234,14 +256,9 @@ pub(crate) fn check(prog: &[SockFilter]) {
     }
     let last = prog[prog.len() - 1].code;
     assert!(last == RET_K || last == RET_A, "the last instruction isn't a return");
-    // Its only refusal is at a load of scratch memory: a program without one is taken. In a
-    // proof, a program with one is refused outright, more strictly than the kernel (which is
-    // sound: the proof then fails), as `bpf!` emits none: the walk, even never taken (the
-    // solver doesn't know the program's opcodes), made each proof 4-6x slower (readme's 15 s
-    // to 65-98 s). The tests run the walk, the kernel's.
-    #[cfg(kani)]
-    assert!(!loads, "a load of scratch memory: not in a proof");
-    #[cfg(not(kani))]
+    // The kernel's rule for scratch memory, always: the compiler emits scratch loads (a nested
+    // value's `ST`/`LDX M[k]`), and `compile` runs this on every program it returns, concrete.
+    // (No proof calls `check`: the node proofs check each template instruction by `insn_ok`.)
     if loads {
         check_scratch_loads(prog);
     }
@@ -280,7 +297,6 @@ pub(crate) fn insn_ok(SockFilter { code, jt, jf, k }: SockFilter, left: usize) -
 /// - a return does fall through: an unreachable load after it is taken if its slot was stored
 ///   before the return. (Without this, `[LD M[0], RET A]` was taken here and refused by Linux.)
 /// Runs after `check`'s loop: every `k` of a memory instruction is a slot, every jump inside.
-#[cfg(not(kani))]
 fn check_scratch_loads(prog: &[SockFilter]) {
     const _: () = assert!(MEMWORDS <= 16, "a bit per slot in a u16");
     const ALL: u16 = u16::MAX;
