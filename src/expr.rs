@@ -155,11 +155,12 @@ pub struct Arm<B> {
     pub body: B,
 }
 
-/// `match d.call()`: its arms, each a [`Cond::Match`]'s arm whose one pattern is the variant's
-/// number, and each arm's pattern as written (`pats[i]` is `arms[i]`'s).
+/// `match d.call()`: its arms, each a [`Cond::Match`]'s arm whose patterns are the variants'
+/// numbers, and each arm's patterns as written (`pats[i]` are `arms[i]`'s: `Call::A { .. } |
+/// Call::B`, alternatives binding nothing, or one pattern binding its fields).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CallMatch<B> {
-    pub pats: Vec<CallPat>,
+    pub pats: Vec<Vec<CallPat>>,
     pub arms: Vec<Arm<B>>,
     pub default: Box<B>,
 }
@@ -175,10 +176,10 @@ pub struct CallPat {
 }
 
 impl<B> CallMatch<B> {
-    /// The arm for pattern `pat`: its number by the table (`None` if `call` has none).
-    pub fn arm(pat: &CallPat, guard: Option<Cond>, body: B) -> Option<Arm<B>> {
-        let nr = crate::calls::nr(pat.call)?;
-        Some(Arm { pats: vec![Leaf { value: nr, src: pat.call }], guard, body })
+    /// The arm for patterns `pats`: each its number by the table (`None` if a call has none).
+    pub fn arm(pats: &[CallPat], guard: Option<Cond>, body: B) -> Option<Arm<B>> {
+        let nrs = pats.iter().map(|p| Some(Leaf { value: crate::calls::nr(p.call)?, src: p.call })).collect::<Option<Vec<_>>>()?;
+        Some(Arm { pats: nrs, guard, body })
     }
 }
 
