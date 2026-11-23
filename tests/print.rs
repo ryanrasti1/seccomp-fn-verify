@@ -110,3 +110,64 @@ fn tree_harness_list() {
     let file: Vec<&str> = include_str!("../src/tree-proof-harnesses").lines().collect();
     assert_eq!(names, file, "regenerate src/tree-proof-harnesses from lemma!");
 }
+
+/// The typed view's hygiene: a field only where its arm binds it, its argument and type the
+/// table's; a signed field never in an unsigned comparison, an unsigned one never in a signed;
+/// `is_null` of a pointer only; an arm's pattern its variant's number.
+#[test]
+fn typed_check() {
+    let v = |src| Leaf { value: 0u32, src };
+    let pat = |call, binds: Vec<&'static str>| CallPat { call, binds, rest: true, braces: true };
+    let on = |p: CallPat, guard: Cond| {
+        let arm = CallMatch::arm(std::slice::from_ref(&p), Some(guard), Stmt::Verdict(v("ALLOW"))).unwrap();
+        Policy { d: "d", body: Stmt::CallMatch(CallMatch { pats: vec![vec![p]], arms: vec![arm], default: Box::new(Stmt::Verdict(v("KILL"))) }) }
+    };
+    let f = |call, name| Box::new(Val::Field(Field::typed(call, name).unwrap()));
+    // right: a signed field, signed; an unsigned one, unsigned; a pointer's is_null
+    assert!(on(pat("Openat", vec!["dfd"]), Cond::SCmp(CmpOp::Ge, f("Openat", "dfd"), k("n"))).check().is_ok());
+    assert!(on(pat("Close", vec!["fd"]), Cond::Cmp(CmpOp::Ge, f("Close", "fd"), k("n"))).check().is_ok());
+    assert!(on(pat("Ppoll", vec!["sigmask"]), Cond::IsNull(f("Ppoll", "sigmask"))).check().is_ok());
+    // a signed field unsigned (ordered, or ==: a leaf's bits may differ), an unsigned one signed
+    assert!(on(pat("Openat", vec!["dfd"]), Cond::Cmp(CmpOp::Ge, f("Openat", "dfd"), k("n"))).check().is_err());
+    assert!(on(pat("Openat", vec!["dfd"]), Cond::Cmp(CmpOp::Eq, f("Openat", "dfd"), k("n"))).check().is_err());
+    assert!(on(pat("Close", vec!["fd"]), Cond::SCmp(CmpOp::Ge, f("Close", "fd"), k("n"))).check().is_err());
+    // a field its arm doesn't bind, or of another variant, or with another argument or type
+    assert!(on(pat("Openat", vec![]), Cond::SCmp(CmpOp::Ge, f("Openat", "dfd"), k("n"))).check().is_err());
+    assert!(on(pat("Connect", vec!["fd"]), Cond::Cmp(CmpOp::Ge, f("Close", "fd"), k("n"))).check().is_err());
+    let forged = Box::new(Val::Field(Field::Typed { call: "Close", name: "fd", arg: 1, ty: seccomp_fn_verify::calls::Ty::U32 }));
+    assert!(on(pat("Close", vec!["fd"]), Cond::Cmp(CmpOp::Ge, forged, k("n"))).check().is_err());
+    // is_null of anything but a pointer field
+    assert!(on(pat("Close", vec!["fd"]), Cond::IsNull(f("Close", "fd"))).check().is_err());
+    // a pattern that isn't its variant's number, or a variant that isn't the table's
+    let p = pat("Close", vec!["fd"]);
+    let mut arm = CallMatch::arm(std::slice::from_ref(&p), None, Stmt::Verdict(v("ALLOW"))).unwrap();
+    arm.pats[0].value = 4;
+    let bad = Policy { d: "d", body: Stmt::CallMatch(CallMatch { pats: vec![vec![p]], arms: vec![arm], default: Box::new(Stmt::Verdict(v("KILL"))) }) };
+    assert!(bad.check().is_err());
+    assert!(CallMatch::arm(&[pat("Nope", vec![])], None, Stmt::Verdict(v("ALLOW"))).is_none());
+    // alternatives: binding nothing, each its number; one that binds is refused
+    let alts = vec![pat("Read", vec![]), pat("Write", vec![])];
+    let arm = CallMatch::arm(&alts, None, Stmt::Verdict(v("ALLOW"))).unwrap();
+    let ok = Policy { d: "d", body: Stmt::CallMatch(CallMatch { pats: vec![alts], arms: vec![arm], default: Box::new(Stmt::Verdict(v("KILL"))) }) };
+    assert!(ok.check().is_ok());
+    assert_eq!(ok.print(), "match d.call() { Call::Read { .. } | Call::Write { .. } => ALLOW, _ => KILL, }");
+    let alts = vec![pat("Close", vec!["fd"]), pat("Write", vec![])];
+    let arm = CallMatch::arm(&alts, None, Stmt::Verdict(v("ALLOW"))).unwrap();
+    assert!(Policy { d: "d", body: Stmt::CallMatch(CallMatch { pats: vec![alts], arms: vec![arm], default: Box::new(Stmt::Verdict(v("KILL"))) }) }.check().is_err());
+    // alternatives binding the same field, the same argument and type: its use is fine; of
+    // another type (an i32 `fd` against a u32 one) refused
+    let on_alts = |alts: Vec<CallPat>, guard: Cond| {
+        let arm = CallMatch::arm(&alts, Some(guard), Stmt::Verdict(v("ALLOW"))).unwrap();
+        Policy { d: "d", body: Stmt::CallMatch(CallMatch { pats: vec![alts], arms: vec![arm], default: Box::new(Stmt::Verdict(v("KILL"))) }) }
+    };
+    let alts = vec![pat("Fstat", vec!["fd"]), pat("Pread64", vec!["fd"])];
+    assert!(on_alts(alts, Cond::Cmp(CmpOp::Ge, f("Fstat", "fd"), k("n"))).check().is_ok());
+    let alts = vec![pat("Fstat", vec!["fd"]), pat("Connect", vec!["fd"])];
+    assert!(on_alts(alts, Cond::Cmp(CmpOp::Ge, f("Fstat", "fd"), k("n"))).check().is_err());
+    // a field outside any arm
+    let outside = Policy { d: "d", body: Stmt::If(Cond::Cmp(CmpOp::Ge, f("Close", "fd"), k("n")), Box::new(Stmt::Verdict(v("A"))), Box::new(Stmt::Verdict(v("B")))) };
+    assert!(outside.check().is_err());
+    // its print
+    let p = on(pat("Openat", vec!["dfd", "flags"]), Cond::SCmp(CmpOp::Ge, f("Openat", "dfd"), k("n")));
+    assert_eq!(p.print(), "match d.call() { Call::Openat { dfd, flags, .. } if dfd >= n => ALLOW, _ => KILL, }");
+}

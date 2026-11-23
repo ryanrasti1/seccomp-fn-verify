@@ -18,6 +18,16 @@ c_lt
 c_le
 c_gt
 c_ge
+c_scmp_eq
+c_scmp_ne
+c_scmp_lt
+c_scmp_le
+c_scmp_gt
+c_scmp_ge
+c_isnull
+c_call_match
+t_call_match
+v_field_typed
 c_and
 c_or
 c_not

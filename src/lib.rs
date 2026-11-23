@@ -20,6 +20,7 @@
 //! [`check_sampled`] is the same assertion on the program, on sampled inputs, for a `#[test]`.
 
 mod bpf;
+pub mod calls;
 pub mod compile;
 pub mod expr;
 pub mod print;

@@ -16,6 +16,7 @@
 //! body isn't the closure's with each parameter replaced by its argument; a pattern that isn't
 //! a path or an integer literal.
 
+use crate::calls::Ty;
 use crate::expr::*;
 
 // Rust's binary precedence, loosest first (the Reference's expression precedence table).
@@ -114,8 +115,7 @@ pub fn leaf_prec(src: &str) -> u8 {
 }
 
 const KEYWORDS: [&str; 18] = [
-    "if", "else", "match", "return", "break", "continue", "loop", "while", "for", "in", "let", "move", "unsafe", "async", "await",
-    "yield", "static", "become",
+    "if", "else", "match", "return", "break", "continue", "loop", "while", "for", "in", "let", "move", "unsafe", "async", "await", "yield", "static", "become",
 ];
 
 fn leaf(src: &str, need: u8) -> String {
@@ -140,6 +140,8 @@ pub fn val(v: &Val, d: &str, need: u8) -> String {
         Val::Field(Field::Arch) => format!("{d}.arch"),
         Val::Field(Field::Ip) => format!("{d}.instruction_pointer"),
         Val::Field(Field::Arg(i)) => format!("{d}.args[{i}]"),
+        // bound by its arm's pattern: its name (the check confirms the binding)
+        Val::Field(Field::Typed { name, .. }) => name.to_string(),
         Val::Const(l) => leaf(l.src, need),
         Val::Bit(op, a, b) => {
             let (p, o) = match op {
@@ -163,6 +165,16 @@ pub fn cond(c: &Cond, d: &str, need: u8) -> String {
         Cond::Static(l) => leaf(l.src, need),
         // comparisons don't chain: both sides tighter
         Cond::Cmp(op, a, b) => wrap(CMP, need, format!("{} {} {}", val(a, d, CMP + 1), cmp_op(*op), val(b, d, CMP + 1))),
+        Cond::SCmp(op, a, b) => wrap(CMP, need, format!("{} {} {}", val(a, d, CMP + 1), cmp_op(*op), val(b, d, CMP + 1))),
+        // a method call binds tighter than anything: its receiver an atom
+        Cond::IsNull(a) => format!("{}.is_null()", val(a, d, ATOM)),
+        Cond::CallMatch(m) => format!(
+            "match {d}.call() {{ {} }}",
+            call_arms(m, d, |b| match b {
+                Cond::Block(_) => cond(b, d, NONE),
+                b => format!("{},", cond(b, d, NONE)),
+            })
+        ),
         Cond::And(a, b) => wrap(AND, need, format!("{} && {}", cond(a, d, AND), cond(b, d, AND + 1))),
         Cond::Or(a, b) => wrap(OR, need, format!("{} || {}", cond(a, d, OR), cond(b, d, OR + 1))),
         Cond::Not(a) => wrap(UNARY, need, format!("!{}", cond(a, d, UNARY))),
@@ -212,6 +224,33 @@ fn arms_<B>(arms: &[Arm<B>], default: &B, d: &str, body: impl Fn(&B) -> String) 
     s + &format!("_ => {}", body(default))
 }
 
+/// A `match d.call()`'s arms and `_`, each body by `body` (with its separator).
+fn call_arms<B>(m: &CallMatch<B>, d: &str, body: impl Fn(&B) -> String) -> String {
+    let mut s = String::new();
+    for (ps, a) in m.pats.iter().zip(&m.arms) {
+        let alts: Vec<String> = ps
+            .iter()
+            .map(|p| {
+                let mut t = format!("Call::{}", p.call);
+                if p.braces {
+                    let mut fs: Vec<String> = p.binds.iter().map(|b| b.to_string()).collect();
+                    if p.rest {
+                        fs.push("..".into());
+                    }
+                    t += &format!(" {{ {} }}", fs.join(", "));
+                }
+                t
+            })
+            .collect();
+        s += &alts.join(" | ");
+        if let Some(g) = &a.guard {
+            s += &format!(" if {}", cond(g, d, NONE));
+        }
+        s += &format!(" => {} ", body(&a.body));
+    }
+    s + &format!("_ => {}", body(&m.default))
+}
+
 /// A statement list: a block's contents.
 pub fn stmt(s: &Stmt, d: &str) -> String {
     match s {
@@ -235,6 +274,13 @@ pub fn stmt(s: &Stmt, d: &str) -> String {
             })
         ),
         Stmt::Block(x) => format!("{{ {} }}", stmt(x, d)),
+        Stmt::CallMatch(m) => format!(
+            "match {d}.call() {{ {} }}",
+            call_arms(m, d, |b| match b {
+                Stmt::Block(x) => format!("{{ {} }}", stmt(x, d)),
+                b => format!("{},", stmt(b, d)),
+            })
+        ),
     }
 }
 
@@ -246,7 +292,7 @@ impl Policy {
 
     /// The hygiene the print relies on (the module's doc): `Err` names what is refused.
     pub fn check(&self) -> Result<(), String> {
-        let mut cx = Check { d: vec![self.d], closures: vec![], params: vec![] };
+        let mut cx = Check { d: vec![self.d], closures: vec![], params: vec![], arm: None };
         cx.stmt(&self.body)
     }
 }
@@ -278,6 +324,8 @@ struct Check<'a> {
     closures: Vec<&'a Let>,
     /// the parameters of the closure whose body this is
     params: Vec<&'static str>,
+    /// the `match d.call()` arm whose guard or body this is: its patterns
+    arm: Option<&'a [CallPat]>,
 }
 
 impl<'a> Check<'a> {
@@ -328,6 +376,19 @@ impl<'a> Check<'a> {
 
     fn val(&self, v: &Val) -> Result<(), String> {
         match v {
+            // a typed field: bound by the arm it is in, by name, its argument and type the table's
+            Val::Field(f @ Field::Typed { call, name, .. }) => match self.arm {
+                // bound by every alternative, as the same argument of the same type (rustc's rule:
+                // one binding, one type); the field names the first's
+                Some(ps @ [p0, ..])
+                    if p0.call == *call
+                        && Field::typed(call, name) == Some(*f)
+                        && ps.iter().all(|p| p.binds.contains(name) && crate::calls::field(p.call, name) == crate::calls::field(call, name)) =>
+                {
+                    Ok(())
+                }
+                _ => Err(format!("a field `{name}` of `{call}` that its arm doesn't bind")),
+            },
             Val::Field(_) => Ok(()),
             Val::Const(l) => self.text(l.src, "a leaf"),
             Val::Bit(_, a, b) => self.val(a).and(self.val(b)),
@@ -343,7 +404,33 @@ impl<'a> Check<'a> {
     fn cond(&mut self, c: &'a Cond) -> Result<(), String> {
         match c {
             Cond::Static(l) => self.text(l.src, "a leaf"),
-            Cond::Cmp(_, a, b) => self.val(a).and(self.val(b)),
+            Cond::Cmp(op, a, b) => {
+                self.val(a)?;
+                self.val(b)?;
+                // a signed field compared as an unsigned value: the print would mean a signed
+                // comparison (rustc's, of the field's type), the code an unsigned one
+                if signed(a, true) || signed(b, true) {
+                    let ordered = !matches!(op, CmpOp::Eq | CmpOp::Ne);
+                    if ordered || i32_field(a) || i32_field(b) {
+                        return Err("an i32 or i64 field in an unsigned comparison".into());
+                    }
+                }
+                Ok(())
+            }
+            Cond::SCmp(_, a, b) => {
+                self.val(a)?;
+                self.val(b)?;
+                // i32s only: each side an i32 field's, a leaf, or (in a closure's body) a param
+                if !(only_i32(a) && only_i32(b)) {
+                    return Err("a signed comparison of a value that isn't an i32".into());
+                }
+                Ok(())
+            }
+            Cond::IsNull(a) => match &**a {
+                Val::Field(Field::Typed { ty: Ty::Ptr, .. }) => self.val(a),
+                _ => Err("`is_null` of anything but a pointer field".into()),
+            },
+            Cond::CallMatch(m) => self.call_match(m, |cx, b| cx.cond(b)),
             Cond::And(a, b) | Cond::Or(a, b) => {
                 self.cond(a)?;
                 self.cond(b)
@@ -386,8 +473,7 @@ impl<'a> Check<'a> {
                 r
             }
             Cond::Apply { name, args, body } => {
-                let Some(Let::Closure { params, body: def, .. }) =
-                    self.closures.iter().rev().find(|c| matches!(c, Let::Closure { name: n, .. } if n == name))
+                let Some(Let::Closure { params, body: def, .. }) = self.closures.iter().rev().find(|c| matches!(c, Let::Closure { name: n, .. } if n == name))
                 else {
                     return Err(format!("a call of `{name}`, no closure in scope"));
                 };
@@ -400,7 +486,8 @@ impl<'a> Check<'a> {
                 if subst(def, args) != **body {
                     return Err(format!("a call of `{name}` whose body isn't the closure's"));
                 }
-                Ok(())
+                // its arguments in place: their fields bound, each comparison's signs right
+                self.cond(body)
             }
         }
     }
@@ -431,7 +518,90 @@ impl<'a> Check<'a> {
                 self.stmt(default)
             }
             Stmt::Block(x) => self.stmt(x),
+            Stmt::CallMatch(m) => self.call_match(m, |cx, b| cx.stmt(b)),
         }
+    }
+
+    /// A `match d.call()`: each arm's pattern a variant of the table's, its binds its fields,
+    /// distinct; its one pattern that variant's number; its guard and body with the pattern
+    /// in scope.
+    fn call_match<B>(&mut self, m: &'a CallMatch<B>, body: impl Fn(&mut Self, &'a B) -> Result<(), String>) -> Result<(), String> {
+        if m.pats.len() != m.arms.len() {
+            return Err("a `match` on the call whose patterns aren't its arms'".into());
+        }
+        let outer = self.arm;
+        for (ps, a) in m.pats.iter().zip(&m.arms) {
+            if ps.is_empty() || a.pats.len() != ps.len() {
+                return Err("an arm of `match d.call()` whose patterns aren't its own".into());
+            }
+            // alternatives bind the same names (rustc refuses otherwise; their types: the fields')
+            if ps.iter().any(|p| {
+                let (mut x, mut y) = (p.binds.clone(), ps[0].binds.clone());
+                x.sort();
+                y.sort();
+                x != y
+            }) {
+                return Err("alternatives of `match d.call()` that bind different fields".into());
+            }
+            for (p, l) in ps.iter().zip(&a.pats) {
+                let nr = crate::calls::nr(p.call).ok_or_else(|| format!("`Call::{}`, not a call of the table's", p.call))?;
+                if l.value != nr || l.src != p.call {
+                    return Err(format!("an arm `Call::{}` whose pattern isn't its number", p.call));
+                }
+                let all = crate::calls::CALLS.iter().find(|r| r.0 == p.call).map_or(0, |r| r.2.len());
+                for (i, b) in p.binds.iter().enumerate() {
+                    if crate::calls::field(p.call, b).is_none() || p.binds[..i].contains(b) {
+                        return Err(format!("`Call::{} {{ {b} }}`: not one of its fields, or twice", p.call));
+                    }
+                    if self.d.contains(b) {
+                        return Err(format!("a field bound as `{b}`, the call's name"));
+                    }
+                }
+                // rustc's: all fields bound, or `..`; a bare path only for a variant without any
+                let as_rust = if all == 0 { p.binds.is_empty() } else { p.braces && (p.rest || p.binds.len() == all) };
+                if !as_rust {
+                    return Err(format!("the pattern of `Call::{}` as Rust needs it", p.call));
+                }
+            }
+            self.arm = Some(ps);
+            let saved = self.closures.clone();
+            let r = (|| {
+                if let Some(g) = &a.guard {
+                    self.cond(g)?;
+                }
+                body(self, &a.body)
+            })();
+            self.closures = saved;
+            self.arm = outer;
+            r?;
+        }
+        body(self, &m.default)
+    }
+}
+
+/// `v` has a signed field (`also64`: an i64's too).
+fn signed(v: &Val, also64: bool) -> bool {
+    match v {
+        Val::Field(Field::Typed { ty: Ty::I32, .. }) => true,
+        Val::Field(Field::Typed { ty: Ty::I64, .. }) => also64,
+        Val::Bit(_, a, b) => signed(a, also64) || signed(b, also64),
+        Val::Shift(_, a, _) | Val::Paren(a) => signed(a, also64),
+        _ => false,
+    }
+}
+
+fn i32_field(v: &Val) -> bool {
+    signed(v, false)
+}
+
+/// `v` is an i32 throughout: its fields i32s (leaves and closure params take its type).
+fn only_i32(v: &Val) -> bool {
+    match v {
+        Val::Field(Field::Typed { ty: Ty::I32, .. }) | Val::Const(_) | Val::Param(..) => true,
+        Val::Field(_) => false,
+        Val::Bit(_, a, b) => only_i32(a) && only_i32(b),
+        Val::Shift(..) => false,
+        Val::Paren(a) => only_i32(a),
     }
 }
 
@@ -441,6 +611,8 @@ pub fn subst(c: &Cond, args: &[Val]) -> Cond {
     match c {
         Cond::Static(_) => c.clone(),
         Cond::Cmp(op, x, y) => Cond::Cmp(*op, Box::new(subst_val(x, args)), Box::new(subst_val(y, args))),
+        Cond::SCmp(op, x, y) => Cond::SCmp(*op, Box::new(subst_val(x, args)), Box::new(subst_val(y, args))),
+        Cond::IsNull(x) => Cond::IsNull(Box::new(subst_val(x, args))),
         Cond::And(x, y) => Cond::And(b(x), b(y)),
         Cond::Or(x, y) => Cond::Or(b(x), b(y)),
         Cond::Not(x) => Cond::Not(b(x)),
@@ -448,7 +620,7 @@ pub fn subst(c: &Cond, args: &[Val]) -> Cond {
         Cond::Block(x) => Cond::Block(b(x)),
         // (a closure's body has none of these: the check refuses them there by their
         // substitution not matching, as they are left as they are)
-        Cond::Let(..) | Cond::Match(..) | Cond::Call { .. } | Cond::Apply { .. } => c.clone(),
+        Cond::Let(..) | Cond::Match(..) | Cond::CallMatch(..) | Cond::Call { .. } | Cond::Apply { .. } => c.clone(),
     }
 }
 

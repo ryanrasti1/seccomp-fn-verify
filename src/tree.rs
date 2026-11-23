@@ -101,6 +101,12 @@ pub enum V {
 pub enum C {
     Static(&'static (&'static S, &'static str)),
     Cmp(&'static (CmpOp, V, V)),
+    /// `a op b` of i32s (`expr::Cond::SCmp`)
+    SCmp(&'static (CmpOp, V, V)),
+    /// `p.is_null()`
+    IsNull(&'static V),
+    /// `match d.call()`: its patterns as written (for the print), its arms, its default
+    CallMatch(&'static (&'static [&'static [CallPat]], Option<&'static A<C>>, C)),
     And(&'static (C, C)),
     Or(&'static (C, C)),
     Not(&'static C),
@@ -138,7 +144,23 @@ pub enum T {
     If(&'static (C, T, T)),
     IfThen(&'static (C, T, T)),
     Match(&'static (Option<&'static A<T>>, T)),
+    CallMatch(&'static (&'static [&'static [CallPat]], Option<&'static A<T>>, T)),
     Block(&'static T),
+}
+
+/// A `match d.call()` arm's pattern, as written (`expr::CallPat`).
+#[derive(Clone, Copy, Debug)]
+pub struct CallPat {
+    pub call: &'static str,
+    pub binds: &'static [&'static str],
+    pub rest: bool,
+    pub braces: bool,
+}
+
+fn call_pats(p: &[&[CallPat]]) -> Vec<Vec<crate::expr::CallPat>> {
+    p.iter()
+        .map(|a| a.iter().map(|q| crate::expr::CallPat { call: q.call, binds: q.binds.to_vec(), rest: q.rest, braces: q.braces }).collect())
+        .collect()
 }
 
 /// A `match`'s arms, a list: an arm (its patterns, guard, body), then the next. (Lists, not
@@ -228,6 +250,9 @@ pub(crate) fn c(x: &C, p: &[u64]) -> Cond {
     match *x {
         C::Static(&(s, src)) => Cond::Static(leaf(s.eval(p) != 0, src)),
         C::Cmp((op, a, b)) => Cond::Cmp(*op, Box::new(v(a, p)), Box::new(v(b, p))),
+        C::SCmp((op, a, b)) => Cond::SCmp(*op, Box::new(v(a, p)), Box::new(v(b, p))),
+        C::IsNull(a) => Cond::IsNull(Box::new(v(a, p))),
+        C::CallMatch((pats, a, d)) => Cond::CallMatch(CallMatch { pats: call_pats(pats), arms: arms(*a, p, |b| c(b, p)), default: bc(d) }),
         C::And((a, b)) => Cond::And(bc(a), bc(b)),
         C::Or((a, b)) => Cond::Or(bc(a), bc(b)),
         C::Not(a) => Cond::Not(bc(a)),
@@ -249,6 +274,7 @@ pub(crate) fn t(x: &T, p: &[u64]) -> Stmt {
         T::If((k, a, b)) => Stmt::If(c(k, p), bt(a), bt(b)),
         T::IfThen((k, a, b)) => Stmt::IfThen(c(k, p), bt(a), bt(b)),
         T::Match((a, d)) => Stmt::Match(arms(*a, p, |b| t(b, p)), bt(d)),
+        T::CallMatch((pats, a, d)) => Stmt::CallMatch(CallMatch { pats: call_pats(pats), arms: arms(*a, p, |b| t(b, p)), default: bt(d) }),
         T::Block(a) => Stmt::Block(bt(a)),
     }
 }
@@ -307,6 +333,9 @@ pub fn eval_c(x: &C, p: &[u64], d: &seccomp_data) -> bool {
     match *x {
         C::Static(&(s, _)) => s.eval(p) != 0,
         C::Cmp((op, a, b)) => op.holds(eval_v(a, p, d), eval_v(b, p, d)),
+        C::SCmp((op, a, b)) => op.holds_i32(eval_v(a, p, d) as u32 as i32, eval_v(b, p, d) as u32 as i32),
+        C::IsNull(a) => eval_v(a, p, d) == 0,
+        C::CallMatch((_, arms, default)) => eval_arms(*arms, p, d, |b| eval_c(b, p, d), || eval_c(default, p, d)),
         C::And((a, b)) => eval_c(a, p, d) && eval_c(b, p, d),
         C::Or((a, b)) => eval_c(a, p, d) || eval_c(b, p, d),
         C::Not(a) => !eval_c(a, p, d),
@@ -328,7 +357,9 @@ pub fn eval_t(x: &T, p: &[u64], d: &seccomp_data) -> u32 {
                 eval_t(b, p, d)
             }
         }
-        T::Match((arms, default)) => eval_arms(*arms, p, d, |b| eval_t(b, p, d), || eval_t(default, p, d)),
+        T::Match((arms, default)) | T::CallMatch((_, arms, default)) => {
+            eval_arms(*arms, p, d, |b| eval_t(b, p, d), || eval_t(default, p, d))
+        }
     }
 }
 

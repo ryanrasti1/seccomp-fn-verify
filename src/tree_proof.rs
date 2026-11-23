@@ -120,6 +120,10 @@ fn shift(op: ShiftOp, wide: bool) {
     val_eq(V::Shift(st((op, a, ps(1), ""))), &p)
 }
 
+fn scmp(op: CmpOp) {
+    cond_eq(C::SCmp(st((op, vl(0), vl(1)))), &params())
+}
+
 fn cmp(op: CmpOp) {
     cond_eq(C::Cmp(st((op, vl(0), vl(1)))), &params())
 }
@@ -157,6 +161,19 @@ lemma! {
     c_le => cmp(CmpOp::Le);
     c_gt => cmp(CmpOp::Gt);
     c_ge => cmp(CmpOp::Ge);
+    c_scmp_eq => scmp(CmpOp::Eq);
+    c_scmp_ne => scmp(CmpOp::Ne);
+    c_scmp_lt => scmp(CmpOp::Lt);
+    c_scmp_le => scmp(CmpOp::Le);
+    c_scmp_gt => scmp(CmpOp::Gt);
+    c_scmp_ge => scmp(CmpOp::Ge);
+    c_isnull => cond_eq(C::IsNull(st(vl(0))), &params());
+    c_call_match => { let (a, _, p) = arms2(); cond_eq(C::CallMatch(st((&[], a, cl(3)))), &p) };
+    t_call_match => { let (_, a, p) = arms2(); stmt_eq(T::CallMatch(st((&[], a, tl(3)))), &p) };
+    v_field_typed => {
+        let ty = [crate::calls::Ty::U16, crate::calls::Ty::U32, crate::calls::Ty::I32, crate::calls::Ty::U64, crate::calls::Ty::I64, crate::calls::Ty::Usize, crate::calls::Ty::Ptr][any::<usize>() % 7];
+        field(Field::Typed { call: "", name: "", arg: any::<u8>() % 6, ty })
+    };
     c_and => cond_eq(C::And(st((cl(0), cl(1)))), &params());
     c_or => cond_eq(C::Or(st((cl(0), cl(1)))), &params());
     c_not => cond_eq(C::Not(st(cl(0))), &params());

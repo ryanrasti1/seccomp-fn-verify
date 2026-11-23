@@ -42,6 +42,7 @@
 //! state; `compile` checks the whole program as the kernel does.
 
 use crate::bpf::*;
+use crate::calls::Ty;
 use crate::compile::*;
 use crate::expr::*;
 use core::mem::{ManuallyDrop, forget};
@@ -182,7 +183,7 @@ fn constant_code(i: sock_filter) -> sock_filter {
             }
         };
     }
-    one_of!(LD_W_ABS, LD_W_IMM, TAX, JA, JEQ_K, JGT_K, JGE_K, JEQ_X, JGT_X, JGE_X, RET_K, AND_K, OR_K, OR_X, LSH_K, RSH_K)
+    one_of!(LD_W_ABS, LD_W_IMM, TAX, JA, JEQ_K, JGT_K, JGE_K, JEQ_X, JGT_X, JGE_X, RET_K, AND_K, OR_K, OR_X, LSH_K, RSH_K, XOR_K)
 }
 
 /// A conditional jump's condition: A against K or X (`jcond`'s contract).
@@ -582,6 +583,28 @@ nodes! {
     Field::Arch => { field_arch_hi => field_with(Field::Arch, true); }
     Field::Ip => { field_ip_hi => field_with(Field::Ip, true); }
     Field::Arg => { field_arg => field_with(Field::Arg(any::<u8>() % 7), false); field_arg_hi => field_with(Field::Arg(any::<u8>() % 7), true); }
+    // a typed field: each type, each half, any argument (past 5: refused)
+    Field::Typed => {
+        typed_u16 => typed_with(Ty::U16); typed_u32 => typed_with(Ty::U32); typed_i32 => typed_with(Ty::I32);
+        typed_u64 => typed_with(Ty::U64); typed_i64 => typed_with(Ty::I64); typed_usize => typed_with(Ty::Usize); typed_ptr => typed_with(Ty::Ptr);
+    }
+    // i32s: each op, each side a leaf or computed (computed both: the right biased into X);
+    // a side not 32 bits refused
+    Cond::SCmp => {
+        scmp_eq_xk => scmp_node(CmpOp::Eq, false, true); scmp_eq_kx => scmp_node(CmpOp::Eq, true, false); scmp_eq_kk => scmp_node(CmpOp::Eq, true, true); scmp_eq_xx => scmp_node(CmpOp::Eq, false, false);
+        scmp_ne_xk => scmp_node(CmpOp::Ne, false, true); scmp_ne_kx => scmp_node(CmpOp::Ne, true, false); scmp_ne_kk => scmp_node(CmpOp::Ne, true, true); scmp_ne_xx => scmp_node(CmpOp::Ne, false, false);
+        scmp_lt_xk => scmp_node(CmpOp::Lt, false, true); scmp_lt_kx => scmp_node(CmpOp::Lt, true, false); scmp_lt_kk => scmp_node(CmpOp::Lt, true, true); scmp_lt_xx => scmp_node(CmpOp::Lt, false, false);
+        scmp_le_xk => scmp_node(CmpOp::Le, false, true); scmp_le_kx => scmp_node(CmpOp::Le, true, false); scmp_le_kk => scmp_node(CmpOp::Le, true, true); scmp_le_xx => scmp_node(CmpOp::Le, false, false);
+        scmp_gt_xk => scmp_node(CmpOp::Gt, false, true); scmp_gt_kx => scmp_node(CmpOp::Gt, true, false); scmp_gt_kk => scmp_node(CmpOp::Gt, true, true); scmp_gt_xx => scmp_node(CmpOp::Gt, false, false);
+        scmp_ge_xk => scmp_node(CmpOp::Ge, false, true); scmp_ge_kx => scmp_node(CmpOp::Ge, true, false); scmp_ge_kk => scmp_node(CmpOp::Ge, true, true); scmp_ge_xx => scmp_node(CmpOp::Ge, false, false);
+        scmp_wide => scmp_wide_node();
+    }
+    Cond::IsNull => { isnull_64 => isnull_node(false); isnull_32 => isnull_node(true); }
+    // `Cond::Match` of its arms: its `eval` and `stat` lines are `Match`'s (`match_by`,
+    // `stat_match`) on `m.arms`, and the recursion calls `Match`'s templates on them
+    // (`carms_code`, `arms_code`), whose arms `carm_*`/`arm_*` prove; here, no arm
+    Cond::CallMatch => { ccallmatch_nil => for st in STATS { same_node(6, st) }; }
+    Stmt::CallMatch => { scallmatch_nil => ssame_node(3); }
     Val::Const => { const_ => const_node(); }
     Val::Bit => {
         bit_and_kx => bit_node(BitOp::And, true, false); bit_and_kk => bit_node(BitOp::And, true, true); bit_and_xx => bit_node(BitOp::And, false, false);
@@ -698,6 +721,7 @@ fn same_node(kind: u8, st: St) {
         2 => Cond::Call { name: "", args: vec![], d: "", body: a },
         3 => Cond::Apply { name: "", args: vec![], body: a },
         5 => Cond::Block(a),
+        6 => Cond::CallMatch(CallMatch { pats: vec![], arms: vec![], default: a }),
         _ => Cond::Match(vec![], a),
     };
     cond_contract(t_same(h, t, f), &d, stat_by(&node, |_| s), node.eval_by(&d, |_| v, |_| 0), t, f);
@@ -762,7 +786,49 @@ fn field_with(field: Field, hi: bool) {
     let d = data();
     let node = Val::Field(field);
     let ux = uses_x_by(&node, |_| true, |_| true);
-    val_contract(t_field::<Frag<1>>(field, hi), &d, || node.eval_by(&d, |_| 0, |_| true), hi, ux);
+    val_contract(t_field::<Frag<2>>(field, hi), &d, || node.eval_by(&d, |_| 0, |_| true), hi, ux);
+}
+
+fn typed_with(ty: Ty) {
+    let hi = any::<bool>();
+    field_with(Field::Typed { call: "", name: "", arg: any::<u8>() % 7, ty }, hi);
+}
+
+/// `a op b` of i32s, each side a leaf or computed (using X or not): the values any i32s' bits
+/// (zero-extended).
+fn scmp_node(op: CmpOp, la: bool, lb: bool) {
+    for (ua, ub) in [(false, false), (true, false), (false, true), (true, true)] {
+        scmp_at(op, la, lb, ua, ub)
+    }
+}
+
+fn scmp_at(op: CmpOp, la: bool, lb: bool, ua: bool, ub: bool) {
+    let (va, vb, t, f, d) = (any::<u32>() as u64, any::<u32>() as u64, exit(), exit(), data());
+    let node = Cond::SCmp(op, Box::new(Val::Const(leaf(va))), Box::new(Val::Const(leaf(vb))));
+    let Cond::SCmp(_, a, b) = &node else { unreachable!() };
+    let eval = node.eval_by(&d, |_| false, by([(&**a, va), (&**b, vb)]));
+    let (ua, ub) = (ua && !la, ub && !lb);
+    let code = t_scmp::<Frag<8>>(op, la.then_some(va), lb.then_some(vb), true, ua, ub, &mut val_hole(va, ua), &mut val_hole(vb, ub), t, f);
+    cond_contract(code, &d, stat_by(&node, |_| None), eval, t, f);
+    forget(node);
+}
+
+/// A side that isn't 32 bits: refused.
+fn scmp_wide_node() {
+    let op = CmpOp::Ge;
+    let (va, vb) = (any::<u64>(), any::<u64>());
+    let code = t_scmp::<Frag<8>>(op, None, Some(vb), false, false, false, &mut val_hole(va, false), &mut val_hole(vb, false), exit(), exit());
+    assert!(code.refused);
+}
+
+fn isnull_node(hz: bool) {
+    let va = if hz { any::<u32>() as u64 } else { any() };
+    let (t, f, d) = (exit(), exit(), data());
+    let node = Cond::IsNull(Box::new(Val::Const(leaf(va))));
+    let eval = node.eval_by(&d, |_| false, |_| va);
+    let code = t_isnull::<Frag<2>>(hz, false, &mut val_hole(va, false), t, f);
+    cond_contract(code, &d, stat_by(&node, |_| None), eval, t, f);
+    forget(node);
 }
 
 fn const_node() {
@@ -848,6 +914,7 @@ fn ssame_node(kind: u8) {
     let node = match kind {
         0 => Stmt::Let(Let::Plain(""), a),
         1 => Stmt::Block(a),
+        3 => Stmt::CallMatch(CallMatch { pats: vec![], arms: vec![], default: a }),
         _ => Stmt::Match(vec![], a),
     };
     stmt_contract(t_ssame::<Frag<1>>(stmt_hole(v)), &d, node.eval_by(&d, |_| false, |_| v));
