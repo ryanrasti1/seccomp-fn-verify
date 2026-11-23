@@ -6,8 +6,8 @@
 //! Each node's code is a fragment, entered at its first instruction in any machine state:
 //! - a condition's, built for its exits `t` and `f` (instructions past its end): goes to `t`
 //!   if the condition holds, else to `f`;
-//! - a value's, built for a half (low or high 32 bits) and a depth `k`: falls through its end,
-//!   the half of the value in A, scratch slots `M[0..k]` unchanged (it uses `M[k..]`);
+//! - a value's, built for a half (low or high 32 bits): falls through its end, the half in A,
+//!   X unchanged unless it `uses_x` (no value uses scratch memory: none is emitted);
 //! - a statement's: returns the statement's value.
 //! - a pattern list's (a `match` arm's), entered with A = `d.nr`: goes to `t` if `d.nr` is
 //!   one of the patterns, else to `f`.
@@ -43,8 +43,8 @@ pub trait Code: Sized {
     fn insn(code: u16, jt: u8, jf: u8, k: u32) -> Self;
     /// [`cmp_half`]'s code (a method, as `jcond`: `proof::half_*` prove it, the other proofs
     /// hold it by its contract)
-    fn cmp_half(kb: Option<u64>, a: ValGen<Self>, b: ValGen<Self>, hi: bool, j: Jumps) -> Self {
-        cmp_half_insns(kb, a, b, hi, j)
+    fn cmp_half(kb: Option<u64>, ua: bool, a: ValGen<Self>, b: ValGen<Self>, hi: bool, j: Jumps) -> Self {
+        cmp_half_insns(kb, ua, a, b, hi, j)
     }
     /// `self`, refused (`why`) if `c`: a refusal of code already built, so that a proof's
     /// fragment keeps one shape either way.
@@ -216,8 +216,25 @@ pub fn t_or<C: Code>(
     }
 }
 
-/// A value child: its code for a half (`true`: the high one) at a depth.
-pub type ValGen<'a, C> = &'a mut dyn FnMut(bool, usize) -> C;
+/// A value child: its code for a half (`true`: the high one).
+pub type ValGen<'a, C> = &'a mut dyn FnMut(bool) -> C;
+
+/// A value's code uses X (else it leaves X as it found it): a u64 shifted by 1 to 31, whose
+/// half mixes both halves, through X. No value uses scratch memory: a value is a field with
+/// constants (`&`, `|`, shifts by leaves), so at most one value is ever held, in X.
+pub fn uses_x(v: &Val) -> bool {
+    uses_x_by(v, uses_x, Val::wide)
+}
+
+/// `uses_x`'s line for `v`, its children's by `u`, their types (`wide`) by `w`.
+pub fn uses_x_by(v: &Val, u: impl Fn(&Val) -> bool, w: impl Fn(&Val) -> bool) -> bool {
+    match v {
+        Val::Field(_) | Val::Const(_) | Val::Param(..) => false,
+        Val::Bit(_, a, b) => u(a) || u(b),
+        Val::Shift(_, a, s) => u(a) || (w(a) && s.value > 0 && s.value < 32),
+        Val::Paren(a) => u(a),
+    }
+}
 
 /// A value's high half is 0 (it is a u32, or a leaf below 2^32, …): a 64-bit comparison of two
 /// such is of their low halves.
@@ -239,16 +256,15 @@ pub fn hz_bit(op: BitOp, a: bool, b: bool) -> bool {
 }
 
 /// The halves of `a` and `b` for a 32-bit operation: A = `a`'s half and the operand `b`'s, by
-/// K (a leaf: its half) or X (computed: at `M[k]`, `a` above it). The source bit to or into an
-/// opcode, and K.
-pub fn operands<C: Code>(kb: Option<u64>, a: ValGen<C>, b: ValGen<C>, hi: bool, k: usize) -> (C, u16, u32) {
+/// K (a leaf: its half) or X (computed: `b` first, `TAX`, then `a`, which must leave X: `ua`,
+/// `a`'s `uses_x`, refuses). The source bit to or into an opcode, and K.
+pub fn operands<C: Code>(kb: Option<u64>, ua: bool, a: ValGen<C>, b: ValGen<C>, hi: bool) -> (C, u16, u32) {
     match kb {
-        Some(v) => (a(hi, k), 0, if hi { (v >> 32) as u32 } else { v as u32 }),
+        Some(v) => (a(hi), 0, if hi { (v >> 32) as u32 } else { v as u32 }),
         None => {
-            let cb = b(hi, k);
-            let ca = a(hi, k + 1);
-            let c = cb.then(C::insn(ST, 0, 0, k as u32)).then(ca).then(C::insn(LDX_MEM, 0, 0, k as u32));
-            (c.refuse_if(k >= MEMWORDS, "a value nested past the scratch memory's 16 slots"), 0x08, 0) // BPF_X
+            let c = b(hi).then(C::insn(TAX, 0, 0, 0)).then(a(hi));
+            let why = "a comparison of two computed sides, each a u64 shifted by 1 to 31 (each mixes its halves through X): compare one with a constant";
+            (c.refuse_if(ua, why), 0x08, 0) // BPF_X
         }
     }
 }
@@ -263,13 +279,13 @@ pub enum Jumps {
 }
 
 /// A half of `a` and of `b` (a leaf: K), then the jumps.
-pub fn cmp_half<C: Code>(kb: Option<u64>, a: ValGen<C>, b: ValGen<C>, hi: bool, j: Jumps) -> C {
-    C::cmp_half(kb, a, b, hi, j)
+pub fn cmp_half<C: Code>(kb: Option<u64>, ua: bool, a: ValGen<C>, b: ValGen<C>, hi: bool, j: Jumps) -> C {
+    C::cmp_half(kb, ua, a, b, hi, j)
 }
 
 /// [`cmp_half`]'s instructions.
-pub fn cmp_half_insns<C: Code>(kb: Option<u64>, a: ValGen<C>, b: ValGen<C>, hi: bool, j: Jumps) -> C {
-    let (c, src, k) = operands(kb, a, b, hi, 0);
+pub fn cmp_half_insns<C: Code>(kb: Option<u64>, ua: bool, a: ValGen<C>, b: ValGen<C>, hi: bool, j: Jumps) -> C {
+    let (c, src, k) = operands(kb, ua, a, b, hi);
     match j {
         Jumps::One(code, t, f) => c.then(jcond(code | src, k, t, f)),
         Jumps::Order(gt, eq, lt) => {
@@ -290,12 +306,15 @@ pub fn t_cmp<C: Code>(
     ka: Option<u64>,
     kb: Option<u64>,
     hz: bool,
+    ua: bool,
+    ub: bool,
     a: ValGen<C>,
     b: ValGen<C>,
     t: usize,
     f: usize,
 ) -> C {
-    if ka.is_some() && kb.is_none() {
+    // a leaf on the left only, or (both computed) the left only using X: swapped
+    if (ka.is_some() && kb.is_none()) || (ka.is_none() && kb.is_none() && ua && !ub) {
         let op = match op {
             CmpOp::Lt => CmpOp::Gt,
             CmpOp::Le => CmpOp::Ge,
@@ -303,7 +322,7 @@ pub fn t_cmp<C: Code>(
             CmpOp::Ge => CmpOp::Le,
             o => o,
         };
-        return t_cmp(op, kb, ka, hz, b, a, t, f);
+        return t_cmp(op, kb, ka, hz, ub, ua, b, a, t, f);
     }
     let (code, t, f) = match op {
         CmpOp::Eq => (JEQ_K, t, f),
@@ -313,13 +332,13 @@ pub fn t_cmp<C: Code>(
         CmpOp::Lt => (JGE_K, f, t),
         CmpOp::Le => (JGT_K, f, t),
     };
-    let low = cmp_half(kb, a, b, false, Jumps::One(code, t, f));
+    let low = cmp_half(kb, ua, a, b, false, Jumps::One(code, t, f));
     if hz {
         return low;
     }
     let n = low.len();
     let j = if code == JEQ_K { Jumps::One(JEQ_K, 0, f + n) } else { Jumps::Order(t + n, 0, f + n) };
-    cmp_half(kb, a, b, true, j).then(low)
+    cmp_half(kb, ua, a, b, true, j).then(low)
 }
 
 // ---- values ----
@@ -348,33 +367,36 @@ pub fn t_const<C: Code>(v: u64, hi: bool) -> C {
 
 /// `a & b`, `a | b`, a half at a time (each half the halves'). A leaf on the left only is
 /// swapped to the right (both commute).
-pub fn t_bit<C: Code>(op: BitOp, ka: Option<u64>, kb: Option<u64>, a: ValGen<C>, b: ValGen<C>, hi: bool, k: usize) -> C {
+pub fn t_bit<C: Code>(op: BitOp, ka: Option<u64>, kb: Option<u64>, a: ValGen<C>, b: ValGen<C>, hi: bool) -> C {
     if ka.is_some() && kb.is_none() {
-        return t_bit(op, kb, ka, b, a, hi, k);
+        return t_bit(op, kb, ka, b, a, hi);
     }
-    let (c, src, imm) = operands(kb, a, b, hi, k);
     let alu = match op {
         BitOp::And => AND_K,
         BitOp::Or => OR_K,
     };
-    c.then(C::insn(alu | src, 0, 0, imm))
+    match kb {
+        Some(v) => a(hi).then(C::insn(alu, 0, 0, if hi { (v >> 32) as u32 } else { v as u32 })),
+        // (`b`'s generator unused: a refused node's code is no claim)
+        None => C::refuse("an `&` or `|` of two computed values: one side must be a constant"),
+    }
 }
 
 /// `(a)`: `a`'s code.
-pub fn t_vsame<C: Code>(a: ValGen<C>, hi: bool, k: usize) -> C {
-    a(hi, k)
+pub fn t_vsame<C: Code>(a: ValGen<C>, hi: bool) -> C {
+    a(hi)
 }
 
 /// `a << s`, `a >> s`, `s` a leaf below the width (Rust panics past it: refused). `wide`: `a`
 /// is a u64 (else a u32: its low half alone, the high half 0). The half's code by its case
 /// ([`shift_case`], [`t_shift_case`]).
-pub fn t_shift<C: Code>(op: ShiftOp, wide: bool, s: u32, a: ValGen<C>, hi: bool, k: usize) -> C {
-    t_shift_case(shift_case(op, wide, s, hi), a, k)
+pub fn t_shift<C: Code>(op: ShiftOp, wide: bool, s: u32, ua: bool, a: ValGen<C>, hi: bool) -> C {
+    t_shift_case(shift_case(op, wide, s, hi), ua, a)
 }
 
 /// A shift's half, by case: refused; 0; one of `a`'s halves as it is (`Copy`), or shifted by an
 /// op and an amount (`Shifted`); or (`Mixed`) the other half's bits moved in (by `back`, `32 -
-/// s`) or-ed with this half's own shifted (by `sh`, `s`), through `M[k]`.
+/// s`) or-ed with this half's own shifted (by `sh`, `s`), through X.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ShiftCase {
     Refused,
@@ -410,20 +432,21 @@ pub fn shift_case(op: ShiftOp, wide: bool, s: u32, hi: bool) -> ShiftCase {
 }
 
 /// A shift case's code.
-pub fn t_shift_case<C: Code>(c: ShiftCase, a: ValGen<C>, k: usize) -> C {
+pub fn t_shift_case<C: Code>(c: ShiftCase, ua: bool, a: ValGen<C>) -> C {
     match c {
         ShiftCase::Refused => C::refuse("a shift by its type's width or more"),
         ShiftCase::Zero => C::insn(LD_W_IMM, 0, 0, 0),
-        ShiftCase::Copy(h) => a(h, k),
-        ShiftCase::Shifted(h, op, by) => a(h, k).then(C::insn(op, 0, 0, by)),
-        ShiftCase::Mixed(h, back, sh, s) => a(!h, k)
+        ShiftCase::Copy(h) => a(h),
+        ShiftCase::Shifted(h, op, by) => a(h).then(C::insn(op, 0, 0, by)),
+        // the other half's bits moved in (into X), then this half's own, or-ed: `a` again,
+        // after the TAX, must leave X
+        ShiftCase::Mixed(h, back, sh, s) => a(!h)
             .then(C::insn(back, 0, 0, 32 - s))
-            .then(C::insn(ST, 0, 0, k as u32))
-            .then(a(h, k + 1))
+            .then(C::insn(TAX, 0, 0, 0))
+            .then(a(h))
             .then(C::insn(sh, 0, 0, s))
-            .then(C::insn(LDX_MEM, 0, 0, k as u32))
             .then(C::insn(OR_X, 0, 0, 0))
-            .refuse_if(k >= MEMWORDS, "a value nested past the scratch memory's 16 slots"),
+            .refuse_if(ua, "a u64 shifted by 1 to 31 of a value that itself mixes halves"),
     }
 }
 
@@ -542,7 +565,7 @@ pub fn cond(c: &Cond, t: usize, f: usize) -> Vec<sock_filter> {
     match c {
         Cond::Static(l) => t_static(l.value, t, f),
         Cond::Cmp(op, a, b) => {
-            t_cmp(*op, a.as_const(), b.as_const(), hi_zero(a) && hi_zero(b), &mut |h, k| val(a, h, k), &mut |h, k| val(b, h, k), t, f)
+            t_cmp(*op, a.as_const(), b.as_const(), hi_zero(a) && hi_zero(b), uses_x(a), uses_x(b), &mut |h| val(a, h), &mut |h| val(b, h), t, f)
         }
         Cond::And(a, b) => t_and(stat(a), stat(b), |t, f| cond(a, t, f), |t, f| cond(b, t, f), t, f),
         Cond::Or(a, b) => t_or(stat(a), stat(b), |t, f| cond(a, t, f), |t, f| cond(b, t, f), t, f),
@@ -553,13 +576,13 @@ pub fn cond(c: &Cond, t: usize, f: usize) -> Vec<sock_filter> {
     }
 }
 
-pub fn val(v: &Val, hi: bool, k: usize) -> Vec<sock_filter> {
+pub fn val(v: &Val, hi: bool) -> Vec<sock_filter> {
     match v {
         Val::Field(f) => t_field(*f, hi),
         Val::Const(l) => t_const(l.value, hi),
-        Val::Bit(op, a, b) => t_bit(*op, a.as_const(), b.as_const(), &mut |h, k| val(a, h, k), &mut |h, k| val(b, h, k), hi, k),
-        Val::Shift(op, a, s) => t_shift(*op, a.wide(), s.value, &mut |h, k| val(a, h, k), hi, k),
-        Val::Paren(a) => t_vsame(&mut |h, k| val(a, h, k), hi, k),
+        Val::Bit(op, a, b) => t_bit(*op, a.as_const(), b.as_const(), &mut |h| val(a, h), &mut |h| val(b, h), hi),
+        Val::Shift(op, a, s) => t_shift(*op, a.wide(), s.value, uses_x(a), &mut |h| val(a, h), hi),
+        Val::Paren(a) => t_vsame(&mut |h| val(a, h), hi),
         Val::Param(..) => t_param(),
     }
 }

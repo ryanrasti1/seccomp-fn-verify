@@ -31,8 +31,8 @@ const MISCOP: u16 = 0xf8;
 const SIZE: u16 = 0x18;
 use libc::{
     BPF_A, BPF_ABS, BPF_ADD, BPF_ALU, BPF_AND, BPF_DIV, BPF_IMM, BPF_JA, BPF_JEQ, BPF_JGE, BPF_JGT, BPF_JMP, BPF_JSET,
-    BPF_K, BPF_LD, BPF_LDX, BPF_LEN, BPF_LSH, BPF_MEM, BPF_MISC, BPF_MUL, BPF_NEG, BPF_OR, BPF_RET, BPF_RSH, BPF_ST,
-    BPF_STX, BPF_SUB, BPF_TAX, BPF_TXA, BPF_W, BPF_X, BPF_XOR,
+    BPF_K, BPF_LD, BPF_LDX, BPF_LEN, BPF_LSH, BPF_MISC, BPF_MUL, BPF_NEG, BPF_OR, BPF_RET, BPF_RSH, BPF_SUB, BPF_TAX,
+    BPF_TXA, BPF_W, BPF_X, BPF_XOR,
 };
 const fn op(c: u32) -> u16 {
     c as u16
@@ -48,8 +48,6 @@ const MISC: u16 = op(BPF_MISC);
 /// RET's source K (`BPF_K`).
 const K_RVAL: u16 = op(BPF_K);
 const LDX: u16 = op(BPF_LDX);
-pub(crate) const ST: u16 = op(BPF_ST);
-pub(crate) const STX: u16 = op(BPF_STX);
 const ALU: u16 = op(BPF_ALU);
 const JMP: u16 = op(BPF_JMP);
 const RET: u16 = op(BPF_RET);
@@ -60,8 +58,6 @@ pub(crate) const LD_W_IMM: u16 = op(BPF_LD | BPF_W | BPF_IMM);
 pub(crate) const LDX_W_IMM: u16 = op(BPF_LDX | BPF_W | BPF_IMM);
 const LD_W_LEN: u16 = op(BPF_LD | BPF_W | BPF_LEN);
 const LDX_W_LEN: u16 = op(BPF_LDX | BPF_W | BPF_LEN);
-pub(crate) const LD_MEM: u16 = op(BPF_LD | BPF_W | BPF_MEM);
-pub(crate) const LDX_MEM: u16 = op(BPF_LDX | BPF_W | BPF_MEM);
 // ALU by K or X; JEQ JGT JGE JSET by K or X. (Named one by one: `check` matches them without a
 // loop, which keeps Kani's model of it small.)
 pub(crate) const ADD_K: u16 = alu(BPF_ADD, BPF_K);
@@ -96,8 +92,6 @@ pub(crate) const RET_K: u16 = op(BPF_RET | BPF_K);
 pub(crate) const RET_A: u16 = op(BPF_RET | BPF_A);
 pub(crate) const TAX: u16 = op(BPF_MISC | BPF_TAX);
 pub(crate) const TXA: u16 = op(BPF_MISC | BPF_TXA);
-/// Scratch memory's words (BPF_MEMWORDS).
-pub(crate) const MEMWORDS: usize = libc::BPF_MEMWORDS as usize;
 /// The kernel's limit on a program's length (BPF_MAXINSNS).
 pub const MAX_INSNS: usize = libc::BPF_MAXINSNS as usize;
 
@@ -107,11 +101,10 @@ pub const MAX_INSNS: usize = libc::BPF_MAXINSNS as usize;
 ///
 /// A program the kernel would refuse to install panics: empty or too long, an opcode seccomp
 /// doesn't take, a jump out of the program, a load out of `seccomp_data`, a division by a
-/// constant 0 or a shift by 32 or more, a scratch slot past the last, a last instruction that
-/// isn't a return (net/core/filter.c `bpf_check_classic`), or a load of a scratch slot not
-/// stored on every path to it (`check_scratch_loads`; in a proof, any load of scratch memory:
-/// see `check`). So a proof that calls this also
-/// proves the kernel takes the program.
+/// constant 0 or a shift by 32 or more, a last instruction that isn't a return (net/core/filter.c
+/// `bpf_check_classic`), or any instruction of scratch memory (stricter than the kernel: none is
+/// emitted; a program with one is refused, never wrongly run). So a program this runs is one the
+/// kernel takes.
 pub fn run_bpf(prog: &[SockFilter], d: &SeccompData) -> u32 {
     check(prog);
     run(prog, d)
@@ -122,7 +115,7 @@ pub fn run_bpf(prog: &[SockFilter], d: &SeccompData) -> u32 {
 /// and is passed over if a jump went past it. (A model checker then sees each instruction at a
 /// known index, and one machine state, which keeps the proof small.)
 fn run(prog: &[SockFilter], d: &SeccompData) -> u32 {
-    let (mut pc, mut s) = (0, State { a: 0, x: 0, mem: [0; MEMWORDS] });
+    let (mut pc, mut s) = (0, State { a: 0, x: 0 });
     for (i, &ins) in prog.iter().enumerate() {
         if pc != i {
             continue;
@@ -135,12 +128,12 @@ fn run(prog: &[SockFilter], d: &SeccompData) -> u32 {
     unreachable!("check(): the last instruction is a return")
 }
 
-/// Classic BPF's machine: the accumulator, the index register, scratch memory.
+/// Classic BPF's machine: the accumulator and the index register. (No scratch memory: the
+/// checks refuse every instruction that uses it, which no template emits.)
 #[derive(Clone, Copy)]
 pub(crate) struct State {
     pub(crate) a: u32,
     pub(crate) x: u32,
-    pub(crate) mem: [u32; MEMWORDS],
 }
 
 /// What an instruction does: on to the next one but `skip`, or the program's verdict.
@@ -186,14 +179,11 @@ pub(crate) fn step(s: &mut State, SockFilter { code, jt, jf, k }: SockFilter, d:
                 BPF_IMM => k,
                 // `check` allows only aligned words inside it: `k / 4` below `WORDS`
                 BPF_ABS => words(d)[(k / 4) as usize],
-                BPF_MEM => s.mem[k as usize],
                 BPF_LEN => DATA_LEN, // sizeof(struct seccomp_data)
-                _ => unreachable!("check() admits only IMM, ABS, MEM and LEN loads"),
+                _ => unreachable!("check() admits only IMM, ABS and LEN loads"),
             };
             if code & CLASS == LD { s.a = v } else { s.x = v }
         }
-        ST => s.mem[k as usize] = s.a,
-        STX => s.mem[k as usize] = s.x,
         ALU => {
             s.a = match (code & OP) as u32 {
                 BPF_ADD => s.a.wrapping_add(src),
@@ -249,32 +239,23 @@ pub(crate) fn step(s: &mut State, SockFilter { code, jt, jf, k }: SockFilter, d:
 /// `seccomp_check_filter`'s list of opcodes): panics on the first it fails.
 pub(crate) fn check(prog: &[SockFilter]) {
     assert!(!prog.is_empty() && prog.len() <= MAX_INSNS, "{} instructions", prog.len());
-    let mut loads = false;
     for (pc, &i) in prog.iter().enumerate() {
-        loads |= i.code == LD_MEM || i.code == LDX_MEM;
         assert!(insn_ok(i, prog.len() - pc - 1), "instruction {pc} the kernel refuses: {:#x}", i.code);
     }
     let last = prog[prog.len() - 1].code;
     assert!(last == RET_K || last == RET_A, "the last instruction isn't a return");
-    // The kernel's rule for scratch memory, always: the compiler emits scratch loads (a nested
-    // value's `ST`/`LDX M[k]`), and `compile` runs this on every program it returns, concrete.
-    // (No proof calls `check`: the node proofs check each template instruction by `insn_ok`.)
-    if loads {
-        check_scratch_loads(prog);
-    }
 }
 
 /// One instruction as the kernel checks it (`bpf_check_classic`, `seccomp_check_filter`), `left`
 /// the number of instructions after it: an opcode seccomp takes, its `k` in range, its jumps
 /// inside the program. (Also the compiler's proofs' check of each template's instructions.)
 pub(crate) fn insn_ok(SockFilter { code, jt, jf, k }: SockFilter, left: usize) -> bool {
-    let mem = (k as usize) < MEMWORDS;
     match code {
         // seccomp_check_filter: inside seccomp_data, aligned (every such word is a field's)
         LD_W_ABS => k % 4 == 0 && k < DATA_LEN,
         LD_W_IMM | LDX_W_IMM | LD_W_LEN | LDX_W_LEN => true,
-        LD_MEM | LDX_MEM => mem,
-        _ if code == ST || code == STX => mem,
+        // scratch memory (ST, STX, LD/LDX MEM): refused, more strictly than the kernel (which
+        // takes a slot stored on every path to its load): no template uses it
         ADD_K | SUB_K | MUL_K | OR_K | AND_K | XOR_K | NEG => true,
         ADD_X | SUB_X | MUL_X | OR_X | AND_X | XOR_X | DIV_X | LSH_X | RSH_X => true,
         DIV_K => k != 0,
@@ -285,44 +266,3 @@ pub(crate) fn insn_ok(SockFilter { code, jt, jf, k }: SockFilter, left: usize) -
         _ => false,
     }
 }
-
-/// The kernel's rule for scratch memory, as its behaviour is observed (`tests/kernel.rs`
-/// `accepts_as_linux`): a load of slot `k` is refused unless `k` is stored on every way into the
-/// load. One forward pass (jumps only go forward). Each instruction is entered by falling
-/// through from the one before and by the jumps that target it; the slots known stored at it
-/// are those stored on all of these. Two quirks, kept as the kernel has them, as the rule is by
-/// instruction, not by reachability:
-/// - nothing falls through a jump: after one, only the jumps into an instruction count (and an
-///   instruction no jump reaches knows every slot stored);
-/// - a return does fall through: an unreachable load after it is taken if its slot was stored
-///   before the return. (Without this, `[LD M[0], RET A]` was taken here and refused by Linux.)
-/// Runs after `check`'s loop: every `k` of a memory instruction is a slot, every jump inside.
-fn check_scratch_loads(prog: &[SockFilter]) {
-    const _: () = assert!(MEMWORDS <= 16, "a bit per slot in a u16");
-    const ALL: u16 = u16::MAX;
-    // by_jumps[pc]: the slots stored on every jump into pc so far (ALL: none yet).
-    let mut by_jumps = vec![ALL; prog.len()];
-    // the slots stored on the way falling through into the current instruction
-    let mut falling: u16 = 0;
-    for (pc, i) in prog.iter().enumerate() {
-        let stored = falling & by_jumps[pc];
-        let targets: &[usize] = match i.code {
-            JA => &[pc + 1 + i.k as usize],
-            JEQ_K | JGT_K | JGE_K | JSET_K | JEQ_X | JGT_X | JGE_X | JSET_X => &[pc + 1 + i.jt as usize, pc + 1 + i.jf as usize],
-            _ => &[],
-        };
-        let after = match i.code {
-            ST | STX => stored | 1 << i.k,
-            LD_MEM | LDX_MEM => {
-                assert!(stored & 1 << i.k != 0, "instruction {pc} the kernel refuses: a load of M[{}] not stored on every path", i.k);
-                stored
-            }
-            _ => stored,
-        };
-        for &t in targets {
-            by_jumps[t] &= after;
-        }
-        falling = if targets.is_empty() { after } else { ALL };
-    }
-}
-

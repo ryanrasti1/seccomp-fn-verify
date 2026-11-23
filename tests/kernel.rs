@@ -147,17 +147,15 @@ fn same(prog: &[SockFilter], calls: &[(u32, [u64; 6])]) {
 /// An unassigned number: allowed, it fails with ENOSYS.
 const NONE: u32 = 999;
 
-/// The opcodes the macro doesn't emit: ALU, X, scratch memory, RET A, JSET.
+/// The opcodes the compiler doesn't emit: ALU, X, RET A, JSET.
 #[test]
 fn alu_as_linux() {
     let i = |code, jt, jf, k| SockFilter { code, jt, jf, k };
     let prog = [
         i(0x20, 0, 0, 16), // A = args[0] low
-        i(0x02, 0, 0, 3),  // M[3] = A
         i(0x54, 0, 0, 0xff), // A &= 0xff
         i(0x04, 0, 0, 1),  // A += 1
         i(0x07, 0, 0, 0),  // X = A
-        i(0x60, 0, 0, 3),  // A = M[3]
         i(0x45, 0, 2, 0x100), // A & 0x100 ?
         i(0x87, 0, 0, 0),  // A = X
         i(0x24, 0, 0, 2),  // A *= 2
@@ -243,18 +241,8 @@ fn loads_as_linux() {
     }
     same_a(&[i(0x80, 0, 0, 0)], &regs[..1]); // A = len
     same_a(&[i(0x81, 0, 0, 0), i(0x87, 0, 0, 0)], &regs[..1]); // X = len; A = X
-    let mem = [
-        i(0x03, 0, 0, 15), // M[15] = X
-        i(0x02, 0, 0, 0),  // M[0] = A
-        i(0x00, 0, 0, 7),  // A = 7
-        i(0x02, 0, 0, 7),  // M[7] = A
-        i(0x60, 0, 0, 15), // A = M[15]
-        i(0x61, 0, 0, 0),  // X = M[0]
-        i(0x1c, 0, 0, 0),  // A -= X
-        i(0x61, 0, 0, 7),  // X = M[7]
-        i(0x2c, 0, 0, 0),  // A *= X
-    ];
-    same_a(&mem, &regs);
+    // (scratch memory: `run_bpf` refuses it, `accepts_as_linux`)
+    let _ = regs;
 }
 
 /// Each conditional jump, by a constant and by X, on each pair of edge values.
@@ -352,6 +340,9 @@ fn accepts_as_linux() {
     for &(what, takes, prog) in table {
         assert_eq!(kernel_accepts(prog), takes, "the kernel: {what}");
         let p = behind_prefix(prog, probe_ip());
-        assert_eq!(std::panic::catch_unwind(|| run_bpf(&p, &d)).is_ok(), takes, "run_bpf: {what}");
+        // scratch memory: refused by `run_bpf` whatever the kernel's verdict (stricter: none is
+        // emitted); else the kernel's verdict
+        let scratch = prog.iter().any(|i| [0x02, 0x03, 0x60, 0x61].contains(&i.code));
+        assert_eq!(std::panic::catch_unwind(|| run_bpf(&p, &d)).is_ok(), takes && !scratch, "run_bpf: {what}");
     }
 }

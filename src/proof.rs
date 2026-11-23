@@ -9,8 +9,8 @@
 //! what its contract says and nothing more. Its value is symbolic, and its facts (`stat`,
 //! `as_const`, `hi_zero`) are given consistent with it. A condition's hole goes to its exit by
 //! its value; a value's sets A to its half; a statement's returns its value; a pattern list's
-//! requires A = `d.nr` and goes to its exit. Each havocs A, X and the scratch slots its contract
-//! lets it use. A child is at least one instruction long unless it is decided when the program
+//! requires A = `d.nr` and goes to its exit. Each havocs A, and X unless its contract keeps it
+//! (a value that doesn't use X). A child is at least one instruction long unless it is decided when the program
 //! is built (`stat`), and a template calls a decided child only as its whole code: every
 //! contract below checks its node's code isn't empty when undecided.
 //!
@@ -25,13 +25,13 @@
 //! - a condition's code, for exits `t`, `f` past its end: goes to `t` if it holds, else `f`;
 //!   its `stat`, if any, is its value;
 //! - a pattern list's, entered with A = `d.nr`: to `t` if `d.nr` is one of them, else `f`;
-//! - a value's half at depth `k`: falls through its end, the half in A, `M[0..k]` unchanged;
+//! - a value's half: falls through its end, the half in A, X unchanged unless it uses X;
 //! - a statement's: returns its value, its jumps inside it.
 //!
 //! # The induction (every tree, from these)
 //! By the tree's height. A leaf's template has no hole: its proof is its contract. A node's
 //! real code is its template's with each hole replaced by the child's code for the exits (or
-//! half and depth) the template asked for; by the hypothesis that code meets the hole's
+//! half) the template asked for; by the hypothesis that code meets the hole's
 //! contract, from any state. Seccomp's jumps go only forward, so a run of the real code is,
 //! hole by hole, a run of the proof's: control enters a child only at its start (a jump into a
 //! hole's middle fails the proof), and leaves at one of its exits in a state the hole's havoc
@@ -57,8 +57,8 @@ enum Hole {
     Cond { t: usize, f: usize, v: bool },
     /// a pattern list's: requires A = `d.nr`; to `t` if `v`, else `f`
     Pats { t: usize, f: usize, v: bool },
-    /// a value's half `v`, at depth `k`
-    Val { v: u32, k: usize },
+    /// a value's half `v`; X havocked if the value uses X (`ux`)
+    Val { v: u32, ux: bool },
     /// a statement's: returns `v`
     Stmt { v: u32 },
 }
@@ -127,9 +127,9 @@ impl<const N: usize> Code for Frag<N> {
     fn jcond(code: u16, k: u32, t: usize, f: usize) -> Self {
         Frag::one(Seg::J { code, k, t, f, len: any::<u16>() as usize + 1 })
     }
-    fn cmp_half(kb: Option<u64>, a: ValGen<Self>, b: ValGen<Self>, hi: bool, j: Jumps) -> Self {
+    fn cmp_half(kb: Option<u64>, _ua: bool, a: ValGen<Self>, b: ValGen<Self>, hi: bool, j: Jumps) -> Self {
         // the halves the holes hold (a proof's value generators make one hole each)
-        let half = |g: ValGen<Self>| match g(hi, 0).segs[0] {
+        let half = |g: ValGen<Self>| match g(hi).segs[0] {
             Seg::H(Hole::Val { v, .. }, _) => v,
             _ => unreachable!(),
         };
@@ -182,7 +182,7 @@ fn constant_code(i: sock_filter) -> sock_filter {
             }
         };
     }
-    one_of!(LD_W_ABS, LD_W_IMM, LDX_MEM, ST, JA, JEQ_K, JGT_K, JGE_K, JEQ_X, JGT_X, JGE_X, RET_K, AND_K, OR_K, AND_X, OR_X, LSH_K, RSH_K)
+    one_of!(LD_W_ABS, LD_W_IMM, TAX, JA, JEQ_K, JGT_K, JGE_K, JEQ_X, JGT_X, JGE_X, RET_K, AND_K, OR_K, OR_X, LSH_K, RSH_K)
 }
 
 /// A conditional jump's condition: A against K or X (`jcond`'s contract).
@@ -200,7 +200,7 @@ fn holds(code: u16, s: &State, k: u32) -> bool {
 fn half_exit(j: Jumps, a: u32, b: u32) -> usize {
     match j {
         Jumps::One(code, t, f) => {
-            if holds(code | 0x08, &State { a, x: b, mem: [0; MEMWORDS] }, 0) { t } else { f }
+            if holds(code | 0x08, &State { a, x: b }, 0) { t } else { f }
         }
         Jumps::Order(gt, eq, lt) => {
             if a > b {
@@ -221,14 +221,11 @@ fn exits_of(j: Jumps) -> usize {
     }
 }
 
-/// What a hole may change: A, X, and `M[k..]`.
-fn havoc(s: &mut State, k: usize) {
+/// What a hole may change: A, and X unless it keeps it (`keep_x`).
+fn havoc(s: &mut State, keep_x: bool) {
     s.a = any();
-    s.x = any();
-    let mut i = k;
-    while i < MEMWORDS {
-        s.mem[i] = any();
-        i += 1;
+    if !keep_x {
+        s.x = any();
     }
 }
 
@@ -289,7 +286,7 @@ fn exec<const N: usize>(fr: &Frag<N>, s: &mut State, d: &seccomp_data, after: us
             }
             Seg::Half { j, a, b, len } => {
                 if at {
-                    havoc(s, 0);
+                    havoc(s, false);
                 }
                 let e = if at { Some(half_exit(j, a, b)) } else { None };
                 leave(&mut r, len, exits_of(j), here - len, e);
@@ -302,13 +299,13 @@ fn exec<const N: usize>(fr: &Frag<N>, s: &mut State, d: &seccomp_data, after: us
                             if matches!(h, Hole::Pats { .. }) {
                                 assert!(s.a == d.nr as u32, "a pattern list entered without A = d.nr");
                             }
-                            havoc(s, 0);
+                            havoc(s, false);
                         }
                         leave(&mut r, len, t.max(f), avail, if at { Some(if v { t } else { f }) } else { None });
                     }
-                    Hole::Val { v, k } => {
+                    Hole::Val { v, ux } => {
                         if at {
-                            havoc(s, k);
+                            havoc(s, !ux);
                             s.a = v;
                         }
                         leave(&mut r, len, 0, avail, if at { Some(0) } else { None });
@@ -361,21 +358,18 @@ fn pats_contract<const N: usize>(code: Frag<N>, d: &seccomp_data, eval: bool, t:
     }
 }
 
-/// A value's half at depth `k`: falls through, the half of `eval` in A, `M[..k]` kept; not
-/// empty. (`eval` is called only if the compiler took the node: Rust panics where it refuses.)
-fn val_contract<const N: usize>(code: Frag<N>, d: &seccomp_data, eval: impl FnOnce() -> u64, hi: bool, k: usize) {
+/// A value's half: falls through, the half of `eval` in A, X kept unless the value uses X
+/// (`ux`, its `uses_x`); not empty. (`eval` is called only if the compiler took the node: Rust
+/// panics where it refuses.)
+fn val_contract<const N: usize>(code: Frag<N>, d: &seccomp_data, eval: impl FnOnce() -> u64, hi: bool, ux: bool) {
     if !code.refused {
         let v = eval();
         assert!(code.len() > 0);
         let mut s = state();
-        let before = s.mem;
+        let x = s.x;
         assert!(exec(&code, &mut s, d, 1) == Out::Exit(0));
         assert!(s.a == if hi { (v >> 32) as u32 } else { v as u32 });
-        let mut i = 0;
-        while i < k.min(MEMWORDS) {
-            assert!(s.mem[i] == before[i], "a slot below the depth changed");
-            i += 1;
-        }
+        assert!(ux || s.x == x, "a value that doesn't use X changed it");
     }
 }
 
@@ -394,17 +388,11 @@ fn data() -> seccomp_data {
 }
 
 fn state() -> State {
-    State { a: any(), x: any(), mem: any() }
+    State { a: any(), x: any() }
 }
 
 fn exit() -> usize {
     any::<u16>() as usize
-}
-
-/// A depth: any slot. (At 16, past the last, a template that stores refuses: no claim. A
-/// symbolic choice between refusing and not would merge two shapes, which Kani is slow on.)
-fn depth() -> usize {
-    any::<u8>() as usize % MEMWORDS
 }
 
 fn leaf<T>(value: T) -> Leaf<T> {
@@ -434,8 +422,8 @@ fn cond_child<const N: usize>(st: St) -> (Box<Cond>, bool, Option<bool>, impl Fn
     })
 }
 
-fn val_hole<const N: usize>(v: u64) -> impl FnMut(bool, usize) -> Frag<N> {
-    move |hi, k| Frag::hole(Hole::Val { v: if hi { (v >> 32) as u32 } else { v as u32 }, k }, false)
+fn val_hole<const N: usize>(v: u64, ux: bool) -> impl FnMut(bool) -> Frag<N> {
+    move |hi| Frag::hole(Hole::Val { v: if hi { (v >> 32) as u32 } else { v as u32 }, ux }, false)
 }
 
 fn stmt_hole<const N: usize>(v: u32) -> impl FnOnce() -> Frag<N> {
@@ -596,117 +584,21 @@ nodes! {
     Field::Arg => { field_arg => field_with(Field::Arg(any::<u8>() % 7), false); field_arg_hi => field_with(Field::Arg(any::<u8>() % 7), true); }
     Val::Const => { const_ => const_node(); }
     Val::Bit => {
-        bit_and_kx => bit_node(BitOp::And, true, false); bit_and_kk => bit_node(BitOp::And, true, true);
-        bit_and_xx_0 => bit_at(BitOp::And, false, false, 0);
-        bit_and_xx_1 => bit_at(BitOp::And, false, false, 1);
-        bit_and_xx_2 => bit_at(BitOp::And, false, false, 2);
-        bit_and_xx_3 => bit_at(BitOp::And, false, false, 3);
-        bit_and_xx_4 => bit_at(BitOp::And, false, false, 4);
-        bit_and_xx_5 => bit_at(BitOp::And, false, false, 5);
-        bit_and_xx_6 => bit_at(BitOp::And, false, false, 6);
-        bit_and_xx_7 => bit_at(BitOp::And, false, false, 7);
-        bit_and_xx_8 => bit_at(BitOp::And, false, false, 8);
-        bit_and_xx_9 => bit_at(BitOp::And, false, false, 9);
-        bit_and_xx_10 => bit_at(BitOp::And, false, false, 10);
-        bit_and_xx_11 => bit_at(BitOp::And, false, false, 11);
-        bit_and_xx_12 => bit_at(BitOp::And, false, false, 12);
-        bit_and_xx_13 => bit_at(BitOp::And, false, false, 13);
-        bit_and_xx_14 => bit_at(BitOp::And, false, false, 14);
-        bit_and_xx_15 => bit_at(BitOp::And, false, false, 15);
+        bit_and_kx => bit_node(BitOp::And, true, false); bit_and_kk => bit_node(BitOp::And, true, true); bit_and_xx => bit_node(BitOp::And, false, false);
     }
     BitOp::And => { bit_and_xk => bit_node(BitOp::And, false, true); }
     BitOp::Or => {
-        bit_or_xk => bit_node(BitOp::Or, false, true); bit_or_kx => bit_node(BitOp::Or, true, false); bit_or_kk => bit_node(BitOp::Or, true, true);
-        bit_or_xx_0 => bit_at(BitOp::Or, false, false, 0);
-        bit_or_xx_1 => bit_at(BitOp::Or, false, false, 1);
-        bit_or_xx_2 => bit_at(BitOp::Or, false, false, 2);
-        bit_or_xx_3 => bit_at(BitOp::Or, false, false, 3);
-        bit_or_xx_4 => bit_at(BitOp::Or, false, false, 4);
-        bit_or_xx_5 => bit_at(BitOp::Or, false, false, 5);
-        bit_or_xx_6 => bit_at(BitOp::Or, false, false, 6);
-        bit_or_xx_7 => bit_at(BitOp::Or, false, false, 7);
-        bit_or_xx_8 => bit_at(BitOp::Or, false, false, 8);
-        bit_or_xx_9 => bit_at(BitOp::Or, false, false, 9);
-        bit_or_xx_10 => bit_at(BitOp::Or, false, false, 10);
-        bit_or_xx_11 => bit_at(BitOp::Or, false, false, 11);
-        bit_or_xx_12 => bit_at(BitOp::Or, false, false, 12);
-        bit_or_xx_13 => bit_at(BitOp::Or, false, false, 13);
-        bit_or_xx_14 => bit_at(BitOp::Or, false, false, 14);
-        bit_or_xx_15 => bit_at(BitOp::Or, false, false, 15);
+        bit_or_xk => bit_node(BitOp::Or, false, true); bit_or_kx => bit_node(BitOp::Or, true, false); bit_or_kk => bit_node(BitOp::Or, true, true); bit_or_xx => bit_node(BitOp::Or, false, false);
     }
-    // a u32's and a u64's, each half; a u64's `Mixed` half (through `M[k]`) a harness per depth
-    Val::Shift => { shl32_lo => shift_node(ShiftOp::Shl, false, false, None); shl32_hi => shift_node(ShiftOp::Shl, false, true, None); shr32_lo => shift_node(ShiftOp::Shr, false, false, None); shr32_hi => shift_node(ShiftOp::Shr, false, true, None); }
+    // a u32's and a u64's, each half
+    Val::Shift => { shl32_lo => shift_node(ShiftOp::Shl, false, false, false, 0); shl32_lo_k => shift_node(ShiftOp::Shl, false, false, false, 1); shl32_lo_ux => shift_node(ShiftOp::Shl, false, false, true, 0); shl32_lo_ux_k => shift_node(ShiftOp::Shl, false, false, true, 1); shl32_hi => shift_node(ShiftOp::Shl, false, true, false, 0); shl32_hi_k => shift_node(ShiftOp::Shl, false, true, false, 1); shl32_hi_ux => shift_node(ShiftOp::Shl, false, true, true, 0); shl32_hi_ux_k => shift_node(ShiftOp::Shl, false, true, true, 1); shr32_lo => shift_node(ShiftOp::Shr, false, false, false, 0); shr32_lo_k => shift_node(ShiftOp::Shr, false, false, false, 1); shr32_lo_ux => shift_node(ShiftOp::Shr, false, false, true, 0); shr32_lo_ux_k => shift_node(ShiftOp::Shr, false, false, true, 1); shr32_hi => shift_node(ShiftOp::Shr, false, true, false, 0); shr32_hi_k => shift_node(ShiftOp::Shr, false, true, false, 1); shr32_hi_ux => shift_node(ShiftOp::Shr, false, true, true, 0); shr32_hi_ux_k => shift_node(ShiftOp::Shr, false, true, true, 1); }
     ShiftOp::Shl => {
-        shl_lo => shift_node(ShiftOp::Shl, true, false, None);
-        shl_hi => shift_node(ShiftOp::Shl, true, true, None);
-        shl_lo_mixed_0 => shift_node(ShiftOp::Shl, true, false, Some(0));
-        shl_lo_mixed_1 => shift_node(ShiftOp::Shl, true, false, Some(1));
-        shl_lo_mixed_2 => shift_node(ShiftOp::Shl, true, false, Some(2));
-        shl_lo_mixed_3 => shift_node(ShiftOp::Shl, true, false, Some(3));
-        shl_lo_mixed_4 => shift_node(ShiftOp::Shl, true, false, Some(4));
-        shl_lo_mixed_5 => shift_node(ShiftOp::Shl, true, false, Some(5));
-        shl_lo_mixed_6 => shift_node(ShiftOp::Shl, true, false, Some(6));
-        shl_lo_mixed_7 => shift_node(ShiftOp::Shl, true, false, Some(7));
-        shl_lo_mixed_8 => shift_node(ShiftOp::Shl, true, false, Some(8));
-        shl_lo_mixed_9 => shift_node(ShiftOp::Shl, true, false, Some(9));
-        shl_lo_mixed_10 => shift_node(ShiftOp::Shl, true, false, Some(10));
-        shl_lo_mixed_11 => shift_node(ShiftOp::Shl, true, false, Some(11));
-        shl_lo_mixed_12 => shift_node(ShiftOp::Shl, true, false, Some(12));
-        shl_lo_mixed_13 => shift_node(ShiftOp::Shl, true, false, Some(13));
-        shl_lo_mixed_14 => shift_node(ShiftOp::Shl, true, false, Some(14));
-        shl_lo_mixed_15 => shift_node(ShiftOp::Shl, true, false, Some(15));
-        shl_hi_mixed_0 => shift_node(ShiftOp::Shl, true, true, Some(0));
-        shl_hi_mixed_1 => shift_node(ShiftOp::Shl, true, true, Some(1));
-        shl_hi_mixed_2 => shift_node(ShiftOp::Shl, true, true, Some(2));
-        shl_hi_mixed_3 => shift_node(ShiftOp::Shl, true, true, Some(3));
-        shl_hi_mixed_4 => shift_node(ShiftOp::Shl, true, true, Some(4));
-        shl_hi_mixed_5 => shift_node(ShiftOp::Shl, true, true, Some(5));
-        shl_hi_mixed_6 => shift_node(ShiftOp::Shl, true, true, Some(6));
-        shl_hi_mixed_7 => shift_node(ShiftOp::Shl, true, true, Some(7));
-        shl_hi_mixed_8 => shift_node(ShiftOp::Shl, true, true, Some(8));
-        shl_hi_mixed_9 => shift_node(ShiftOp::Shl, true, true, Some(9));
-        shl_hi_mixed_10 => shift_node(ShiftOp::Shl, true, true, Some(10));
-        shl_hi_mixed_11 => shift_node(ShiftOp::Shl, true, true, Some(11));
-        shl_hi_mixed_12 => shift_node(ShiftOp::Shl, true, true, Some(12));
-        shl_hi_mixed_13 => shift_node(ShiftOp::Shl, true, true, Some(13));
-        shl_hi_mixed_14 => shift_node(ShiftOp::Shl, true, true, Some(14));
-        shl_hi_mixed_15 => shift_node(ShiftOp::Shl, true, true, Some(15));
+        shl_lo => shift_node(ShiftOp::Shl, true, false, false, 0); shl_lo_k => shift_node(ShiftOp::Shl, true, false, false, 1); shl_lo_mix => shift_node(ShiftOp::Shl, true, false, false, 2); shl_lo_ux => shift_node(ShiftOp::Shl, true, false, true, 0); shl_lo_ux_k => shift_node(ShiftOp::Shl, true, false, true, 1); shl_lo_ux_mix => shift_node(ShiftOp::Shl, true, false, true, 2);
+        shl_hi => shift_node(ShiftOp::Shl, true, true, false, 0); shl_hi_k => shift_node(ShiftOp::Shl, true, true, false, 1); shl_hi_mix => shift_node(ShiftOp::Shl, true, true, false, 2); shl_hi_ux => shift_node(ShiftOp::Shl, true, true, true, 0); shl_hi_ux_k => shift_node(ShiftOp::Shl, true, true, true, 1); shl_hi_ux_mix => shift_node(ShiftOp::Shl, true, true, true, 2);
     }
     ShiftOp::Shr => {
-        shr_lo => shift_node(ShiftOp::Shr, true, false, None);
-        shr_hi => shift_node(ShiftOp::Shr, true, true, None);
-        shr_lo_mixed_0 => shift_node(ShiftOp::Shr, true, false, Some(0));
-        shr_lo_mixed_1 => shift_node(ShiftOp::Shr, true, false, Some(1));
-        shr_lo_mixed_2 => shift_node(ShiftOp::Shr, true, false, Some(2));
-        shr_lo_mixed_3 => shift_node(ShiftOp::Shr, true, false, Some(3));
-        shr_lo_mixed_4 => shift_node(ShiftOp::Shr, true, false, Some(4));
-        shr_lo_mixed_5 => shift_node(ShiftOp::Shr, true, false, Some(5));
-        shr_lo_mixed_6 => shift_node(ShiftOp::Shr, true, false, Some(6));
-        shr_lo_mixed_7 => shift_node(ShiftOp::Shr, true, false, Some(7));
-        shr_lo_mixed_8 => shift_node(ShiftOp::Shr, true, false, Some(8));
-        shr_lo_mixed_9 => shift_node(ShiftOp::Shr, true, false, Some(9));
-        shr_lo_mixed_10 => shift_node(ShiftOp::Shr, true, false, Some(10));
-        shr_lo_mixed_11 => shift_node(ShiftOp::Shr, true, false, Some(11));
-        shr_lo_mixed_12 => shift_node(ShiftOp::Shr, true, false, Some(12));
-        shr_lo_mixed_13 => shift_node(ShiftOp::Shr, true, false, Some(13));
-        shr_lo_mixed_14 => shift_node(ShiftOp::Shr, true, false, Some(14));
-        shr_lo_mixed_15 => shift_node(ShiftOp::Shr, true, false, Some(15));
-        shr_hi_mixed_0 => shift_node(ShiftOp::Shr, true, true, Some(0));
-        shr_hi_mixed_1 => shift_node(ShiftOp::Shr, true, true, Some(1));
-        shr_hi_mixed_2 => shift_node(ShiftOp::Shr, true, true, Some(2));
-        shr_hi_mixed_3 => shift_node(ShiftOp::Shr, true, true, Some(3));
-        shr_hi_mixed_4 => shift_node(ShiftOp::Shr, true, true, Some(4));
-        shr_hi_mixed_5 => shift_node(ShiftOp::Shr, true, true, Some(5));
-        shr_hi_mixed_6 => shift_node(ShiftOp::Shr, true, true, Some(6));
-        shr_hi_mixed_7 => shift_node(ShiftOp::Shr, true, true, Some(7));
-        shr_hi_mixed_8 => shift_node(ShiftOp::Shr, true, true, Some(8));
-        shr_hi_mixed_9 => shift_node(ShiftOp::Shr, true, true, Some(9));
-        shr_hi_mixed_10 => shift_node(ShiftOp::Shr, true, true, Some(10));
-        shr_hi_mixed_11 => shift_node(ShiftOp::Shr, true, true, Some(11));
-        shr_hi_mixed_12 => shift_node(ShiftOp::Shr, true, true, Some(12));
-        shr_hi_mixed_13 => shift_node(ShiftOp::Shr, true, true, Some(13));
-        shr_hi_mixed_14 => shift_node(ShiftOp::Shr, true, true, Some(14));
-        shr_hi_mixed_15 => shift_node(ShiftOp::Shr, true, true, Some(15));
+        shr_lo => shift_node(ShiftOp::Shr, true, false, false, 0); shr_lo_k => shift_node(ShiftOp::Shr, true, false, false, 1); shr_lo_mix => shift_node(ShiftOp::Shr, true, false, false, 2); shr_lo_ux => shift_node(ShiftOp::Shr, true, false, true, 0); shr_lo_ux_k => shift_node(ShiftOp::Shr, true, false, true, 1); shr_lo_ux_mix => shift_node(ShiftOp::Shr, true, false, true, 2);
+        shr_hi => shift_node(ShiftOp::Shr, true, true, false, 0); shr_hi_k => shift_node(ShiftOp::Shr, true, true, false, 1); shr_hi_mix => shift_node(ShiftOp::Shr, true, true, false, 2); shr_hi_ux => shift_node(ShiftOp::Shr, true, true, true, 0); shr_hi_ux_k => shift_node(ShiftOp::Shr, true, true, true, 1); shr_hi_ux_mix => shift_node(ShiftOp::Shr, true, true, true, 2);
     }
     Val::Paren => { vparen => vparen_node(); }
     Val::Param => { param => param_node(); }
@@ -739,11 +631,19 @@ fn jcond_with(code: u16) {
     }
 }
 
-/// `cmp_half`'s instructions meet its contract: A, B the halves (B a leaf's, or computed into
-/// X through `M[0]`), the jumps by them.
+/// `cmp_half`'s instructions meet its contract: A, B the halves (B a leaf's, or computed first
+/// into X, `TAX`, the left then computed without it), the jumps by them. The right may use X;
+/// a left that does is refused (`ua`).
 fn half_with(leaf_b: bool, j: Jumps) {
+    for (ua, ub) in [(false, false), (false, true), (true, false)] {
+        half_at(leaf_b, j, ua, ub)
+    }
+}
+
+fn half_at(leaf_b: bool, j: Jumps, ua: bool, ub: bool) {
     let (va, vb, hi, d) = (any::<u64>(), any::<u64>(), any::<bool>(), data());
-    let c = cmp_half_insns::<Frag<8>>(if leaf_b { Some(vb) } else { None }, &mut val_hole(va), &mut val_hole(vb), hi, j);
+    let c = cmp_half_insns::<Frag<8>>(if leaf_b { Some(vb) } else { None }, ua, &mut val_hole(va, ua), &mut val_hole(vb, ub), hi, j);
+    assert!(leaf_b || !ua || c.refused, "a left that uses X, over a computed right");
     let (a, b) = if hi { ((va >> 32) as u32, (vb >> 32) as u32) } else { (va as u32, vb as u32) };
     if !c.refused {
         assert!(exec(&c, &mut state(), &d, exits_of(j) + 1) == Out::Exit(half_exit(j, a, b)));
@@ -841,80 +741,94 @@ fn carm_fit(fit: bool, guard: Option<St>, sb: St, sr: St) {
 /// `a op b`, the children's facts given: each a leaf or computed (`la`, `lb`), both high halves
 /// known 0 (`hz`) or not.
 fn cmp_node(op: CmpOp, la: bool, lb: bool, hz: bool) {
+    // which side uses X: the template swaps a computed left that does, over a right that doesn't
+    for (ua, ub) in [(false, false), (true, false), (false, true), (true, true)] {
+        cmp_at(op, la, lb, hz, ua, ub)
+    }
+}
+
+fn cmp_at(op: CmpOp, la: bool, lb: bool, hz: bool, ua: bool, ub: bool) {
     let val = |hz: bool| -> u64 { if hz { any::<u32>() as u64 } else { any() } };
     let (va, vb, t, f, d) = (val(hz), val(hz), exit(), exit(), data());
     let node = Cond::Cmp(op, Box::new(Val::Const(leaf(va))), Box::new(Val::Const(leaf(vb))));
     let Cond::Cmp(_, a, b) = &node else { unreachable!() };
     let eval = node.eval_by(&d, |_| false, by([(&**a, va), (&**b, vb)]));
-    let code = t_cmp::<Frag<2>>(op, la.then_some(va), lb.then_some(vb), hz, &mut val_hole(va), &mut val_hole(vb), t, f);
+    let code = t_cmp::<Frag<2>>(op, la.then_some(va), lb.then_some(vb), hz, ua, ub, &mut val_hole(va, ua), &mut val_hole(vb, ub), t, f);
     cond_contract(code, &d, stat_by(&node, |_| None), eval, t, f);
     forget(node);
 }
 
 fn field_with(field: Field, hi: bool) {
-    let (k, d) = (depth(), data());
+    let d = data();
     let node = Val::Field(field);
-    val_contract(t_field::<Frag<1>>(field, hi), &d, || node.eval_by(&d, |_| 0, |_| true), hi, k);
+    let ux = uses_x_by(&node, |_| true, |_| true);
+    val_contract(t_field::<Frag<1>>(field, hi), &d, || node.eval_by(&d, |_| 0, |_| true), hi, ux);
 }
 
 fn const_node() {
-    let (v, hi, k, d) = (any::<u64>(), any::<bool>(), depth(), data());
+    let (v, hi, d) = (any::<u64>(), any::<bool>(), data());
     let node = Val::Const(leaf(v));
-    val_contract(t_const::<Frag<1>>(v, hi), &d, || node.eval_by(&d, |_| 0, |_| true), hi, k);
+    let ux = uses_x_by(&node, |_| true, |_| true);
+    val_contract(t_const::<Frag<1>>(v, hi), &d, || node.eval_by(&d, |_| 0, |_| true), hi, ux);
 }
 
-/// `a & b`, `a | b`, each side a leaf or computed, at any depth (computed on both sides,
-/// through `M[k]`: a harness per depth, `bit_at`: a store and a load at a symbolic slot cost the
-/// solver 10x).
+/// `a & b`, `a | b`, each side a leaf or computed (both computed: refused), the computed one
+/// using X or not.
 fn bit_node(op: BitOp, la: bool, lb: bool) {
-    bit_at(op, la, lb, depth())
-}
-
-fn bit_at(op: BitOp, la: bool, lb: bool, k: usize) {
-    let (va, vb, hi, d) = (any::<u64>(), any::<u64>(), any::<bool>(), data());
-    let node = Val::Bit(op, Box::new(Val::Const(leaf(va))), Box::new(Val::Const(leaf(vb))));
-    let Val::Bit(_, a, b) = &node else { unreachable!() };
-    let code = t_bit::<Frag<5>>(op, la.then_some(va), lb.then_some(vb), &mut val_hole(va), &mut val_hole(vb), hi, k);
-    val_contract(code, &d, || node.eval_by(&d, by([(&**a, va), (&**b, vb)]), |_| true), hi, k);
-    forget(node);
+    for ux in [false, true] {
+        let (va, vb, hi, d) = (any::<u64>(), any::<u64>(), any::<bool>(), data());
+        let node = Val::Bit(op, Box::new(Val::Const(leaf(va))), Box::new(Val::Const(leaf(vb))));
+        let Val::Bit(_, a, b) = &node else { unreachable!() };
+        // a leaf side's code doesn't use X
+        let code = t_bit::<Frag<5>>(op, la.then_some(va), lb.then_some(vb), &mut val_hole(va, ux && !la), &mut val_hole(vb, ux && !lb), hi);
+        assert!(la || lb || code.refused, "an & or | of two computed values");
+        let u = uses_x_by(&node, by([(&**a, ux && !la), (&**b, ux && !lb)]), |_| true);
+        val_contract(code, &d, || node.eval_by(&d, by([(&**a, va), (&**b, vb)]), |_| true), hi, u);
+        forget(node);
+    }
 }
 
 /// `a << s`, `a >> s`: `a` a u64 (a leaf's placeholder) or a u32 (`d.arch`'s), `s` any, the
 /// half `hi`. `t_shift` is `t_shift_case` of `shift_case`: each case's code is checked in its
 /// own arm, the case's opcodes (asserted) as constants (one shape each: Kani merging the cases'
 /// fragments took 99 s).
-fn shift_node(op: ShiftOp, wide: bool, hi: bool, at: Option<usize>) {
+/// The shift, `a` using X (`ua`) or not, the cases of one group (`group`: 0 refused, zero or
+/// copied; 1 shifted; 2 mixed): a harness each.
+fn shift_node(op: ShiftOp, wide: bool, hi: bool, ua: bool, group: u8) {
     let (sh, back) = if op == ShiftOp::Shl { (LSH_K, RSH_K) } else { (RSH_K, LSH_K) };
-    // `Mixed` stores at `M[k]`: a harness per depth (`at`); every other case at any depth
-    let k = at.unwrap_or_else(depth);
     let (va, s, d) = (any::<u64>(), any::<u32>(), data());
     let a = Box::new(if wide { Val::Const(leaf(va)) } else { Val::Field(Field::Arch) });
     let node = ManuallyDrop::new(Val::Shift(op, a, leaf(s)));
+    let ux = uses_x_by(&node, |_| ua, |_| wide);
     let eval = || node.eval_by(&d, |_| va, |_| wide);
-    let a = &mut val_hole(va);
-    match (shift_case(op, wide, s, hi), at) {
-        (ShiftCase::Mixed(h, b, o, x), Some(_)) => {
+    let a = &mut val_hole(va, ua);
+    match shift_case(op, wide, s, hi) {
+        ShiftCase::Mixed(h, b, o, x) if group == 2 => {
             assert!(b == back && o == sh);
-            val_contract(t_shift_case::<Frag<7>>(ShiftCase::Mixed(h, back, sh, x), a, k), &d, eval, hi, k)
+            let code = t_shift_case::<Frag<7>>(ShiftCase::Mixed(h, back, sh, x), ua, a);
+            assert!(!ua || code.refused, "a mix of a value that uses X");
+            val_contract(code, &d, eval, hi, ux)
         }
-        (_, Some(_)) => {}
-        (ShiftCase::Refused, None) => assert!(t_shift_case::<Frag<7>>(ShiftCase::Refused, a, k).refused),
-        (ShiftCase::Zero, None) => val_contract(t_shift_case::<Frag<7>>(ShiftCase::Zero, a, k), &d, eval, hi, k),
-        (ShiftCase::Copy(h), None) => val_contract(t_shift_case::<Frag<7>>(ShiftCase::Copy(h), a, k), &d, eval, hi, k),
-        (ShiftCase::Shifted(h, o, b), None) => {
+        ShiftCase::Refused if group == 0 => assert!(t_shift_case::<Frag<7>>(ShiftCase::Refused, ua, a).refused),
+        ShiftCase::Zero if group == 0 => val_contract(t_shift_case::<Frag<7>>(ShiftCase::Zero, ua, a), &d, eval, hi, ux),
+        ShiftCase::Copy(h) if group == 0 => val_contract(t_shift_case::<Frag<7>>(ShiftCase::Copy(h), ua, a), &d, eval, hi, ux),
+        ShiftCase::Shifted(h, o, b) if group == 1 => {
             assert!(o == sh);
-            val_contract(t_shift_case::<Frag<7>>(ShiftCase::Shifted(h, sh, b), a, k), &d, eval, hi, k)
+            val_contract(t_shift_case::<Frag<7>>(ShiftCase::Shifted(h, sh, b), ua, a), &d, eval, hi, ux)
         }
-        // each depth's harness
-        (ShiftCase::Mixed(..), None) => {}
+        // another group's harness
+        _ => {}
     }
 }
 
 fn vparen_node() {
-    let (va, hi, k, d) = (any::<u64>(), any::<bool>(), depth(), data());
-    let node = Val::Paren(Box::new(Val::Const(leaf(va))));
-    val_contract(t_vsame::<Frag<1>>(&mut val_hole(va), hi, k), &d, || node.eval_by(&d, |_| va, |_| true), hi, k);
-    forget(node);
+    for ua in [false, true] {
+        let (va, hi, d) = (any::<u64>(), any::<bool>(), data());
+        let node = Val::Paren(Box::new(Val::Const(leaf(va))));
+        let ux = uses_x_by(&node, |_| ua, |_| true);
+        val_contract(t_vsame::<Frag<1>>(&mut val_hole(va, ua), hi), &d, || node.eval_by(&d, |_| va, |_| true), hi, ux);
+        forget(node);
+    }
 }
 
 fn param_node() {
