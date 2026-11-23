@@ -513,10 +513,10 @@ nodes! {
         half_k_jgt => half_with(true, Jumps::One(JGT_K, exit(), exit()));
         half_k_jge => half_with(true, Jumps::One(JGE_K, exit(), exit()));
         half_k_order => half_with(true, Jumps::Order(exit(), exit(), exit()));
-        half_x_jeq => half_with(false, Jumps::One(JEQ_K, exit(), exit()));
-        half_x_jgt => half_with(false, Jumps::One(JGT_K, exit(), exit()));
-        half_x_jge => half_with(false, Jumps::One(JGE_K, exit(), exit()));
-        half_x_order => half_with(false, Jumps::Order(exit(), exit(), exit()));
+        half_x_jeq_ff => half_at(false, Jumps::One(JEQ_K, exit(), exit()), false, false); half_x_jeq_ft => half_at(false, Jumps::One(JEQ_K, exit(), exit()), false, true); half_x_jeq_tf => half_at(false, Jumps::One(JEQ_K, exit(), exit()), true, false);
+        half_x_jgt_ff => half_at(false, Jumps::One(JGT_K, exit(), exit()), false, false); half_x_jgt_ft => half_at(false, Jumps::One(JGT_K, exit(), exit()), false, true); half_x_jgt_tf => half_at(false, Jumps::One(JGT_K, exit(), exit()), true, false);
+        half_x_jge_ff => half_at(false, Jumps::One(JGE_K, exit(), exit()), false, false); half_x_jge_ft => half_at(false, Jumps::One(JGE_K, exit(), exit()), false, true); half_x_jge_tf => half_at(false, Jumps::One(JGE_K, exit(), exit()), true, false);
+        half_x_order_ff => half_at(false, Jumps::Order(exit(), exit(), exit()), false, false); half_x_order_ft => half_at(false, Jumps::Order(exit(), exit(), exit()), false, true); half_x_order_tf => half_at(false, Jumps::Order(exit(), exit(), exit()), true, false);
     }
     Lemma::Pats => { pats_ff => pats_node(false, false); pats_ft => pats_node(false, true); pats_tf => pats_node(true, false); pats_tt => pats_node(true, true); }
     Cond::Static => { static_ => static_node(); }
@@ -658,9 +658,9 @@ fn jcond_with(code: u16) {
 /// into X, `TAX`, the left then computed without it), the jumps by them. The right may use X;
 /// a left that does is refused (`ua`).
 fn half_with(leaf_b: bool, j: Jumps) {
-    for (ua, ub) in [(false, false), (false, true), (true, false)] {
-        half_at(leaf_b, j, ua, ub)
-    }
+    // a leaf right: no X (a left's use of it changes nothing); a computed right: `half_at`, a
+    // harness per combination
+    half_at(leaf_b, j, false, false)
 }
 
 fn half_at(leaf_b: bool, j: Jumps, ua: bool, ub: bool) {
