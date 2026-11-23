@@ -1,0 +1,17 @@
+[package]
+name = "seccomp-fn-verify"
+description = "The trusted part of seccomp-fn: the tree, its meaning, the compiler proven once, and the check that a policy is its tree"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# seccomp_data, sock_filter, the opcodes
+libc = "0.2"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }
+
+[profile.dev]
+panic = "abort"
