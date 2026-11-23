@@ -566,18 +566,18 @@ nodes! {
         carm_true_true_false => carm_fit(true, Some(St::Yes(true)), St::Yes(true), St::Yes(false));
         carm_true_true_true => carm_fit(true, Some(St::Yes(true)), St::Yes(true), St::Yes(true));
     }
-    CmpOp::Eq => { cmp_eq_xx => cmp_node(CmpOp::Eq, false, false, false); cmp_eq_xk => cmp_node(CmpOp::Eq, false, true, false); cmp_eq_kx => cmp_node(CmpOp::Eq, true, false, false);
-        cmp_eq_xx_32 => cmp_node(CmpOp::Eq, false, false, true); cmp_eq_xk_32 => cmp_node(CmpOp::Eq, false, true, true); cmp_eq_kx_32 => cmp_node(CmpOp::Eq, true, false, true); }
-    CmpOp::Ne => { cmp_ne_xx => cmp_node(CmpOp::Ne, false, false, false); cmp_ne_xk => cmp_node(CmpOp::Ne, false, true, false); cmp_ne_kx => cmp_node(CmpOp::Ne, true, false, false); cmp_ne_kk => cmp_node(CmpOp::Ne, true, true, false);
-        cmp_ne_xx_32 => cmp_node(CmpOp::Ne, false, false, true); cmp_ne_xk_32 => cmp_node(CmpOp::Ne, false, true, true); cmp_ne_kx_32 => cmp_node(CmpOp::Ne, true, false, true); cmp_ne_kk_32 => cmp_node(CmpOp::Ne, true, true, true); }
-    CmpOp::Lt => { cmp_lt_xx => cmp_node(CmpOp::Lt, false, false, false); cmp_lt_xk => cmp_node(CmpOp::Lt, false, true, false); cmp_lt_kx => cmp_node(CmpOp::Lt, true, false, false); cmp_lt_kk => cmp_node(CmpOp::Lt, true, true, false);
-        cmp_lt_xx_32 => cmp_node(CmpOp::Lt, false, false, true); cmp_lt_xk_32 => cmp_node(CmpOp::Lt, false, true, true); cmp_lt_kx_32 => cmp_node(CmpOp::Lt, true, false, true); cmp_lt_kk_32 => cmp_node(CmpOp::Lt, true, true, true); }
-    CmpOp::Le => { cmp_le_xx => cmp_node(CmpOp::Le, false, false, false); cmp_le_xk => cmp_node(CmpOp::Le, false, true, false); cmp_le_kx => cmp_node(CmpOp::Le, true, false, false); cmp_le_kk => cmp_node(CmpOp::Le, true, true, false);
-        cmp_le_xx_32 => cmp_node(CmpOp::Le, false, false, true); cmp_le_xk_32 => cmp_node(CmpOp::Le, false, true, true); cmp_le_kx_32 => cmp_node(CmpOp::Le, true, false, true); cmp_le_kk_32 => cmp_node(CmpOp::Le, true, true, true); }
-    CmpOp::Gt => { cmp_gt_xx => cmp_node(CmpOp::Gt, false, false, false); cmp_gt_xk => cmp_node(CmpOp::Gt, false, true, false); cmp_gt_kx => cmp_node(CmpOp::Gt, true, false, false); cmp_gt_kk => cmp_node(CmpOp::Gt, true, true, false);
-        cmp_gt_xx_32 => cmp_node(CmpOp::Gt, false, false, true); cmp_gt_xk_32 => cmp_node(CmpOp::Gt, false, true, true); cmp_gt_kx_32 => cmp_node(CmpOp::Gt, true, false, true); cmp_gt_kk_32 => cmp_node(CmpOp::Gt, true, true, true); }
-    CmpOp::Ge => { cmp_ge_xx => cmp_node(CmpOp::Ge, false, false, false); cmp_ge_xk => cmp_node(CmpOp::Ge, false, true, false); cmp_ge_kx => cmp_node(CmpOp::Ge, true, false, false); cmp_ge_kk => cmp_node(CmpOp::Ge, true, true, false);
-        cmp_ge_xx_32 => cmp_node(CmpOp::Ge, false, false, true); cmp_ge_xk_32 => cmp_node(CmpOp::Ge, false, true, true); cmp_ge_kx_32 => cmp_node(CmpOp::Ge, true, false, true); cmp_ge_kk_32 => cmp_node(CmpOp::Ge, true, true, true); }
+    CmpOp::Eq => { cmp_eq_xx_ff => cmp_xx(CmpOp::Eq, false, false, false); cmp_eq_xx_tf => cmp_xx(CmpOp::Eq, false, true, false); cmp_eq_xx_ft => cmp_xx(CmpOp::Eq, false, false, true); cmp_eq_xx_tt => cmp_xx(CmpOp::Eq, false, true, true); cmp_eq_xk => cmp_node(CmpOp::Eq, false, true, false); cmp_eq_kx => cmp_node(CmpOp::Eq, true, false, false);
+        cmp_eq_xx_32_ff => cmp_xx(CmpOp::Eq, true, false, false); cmp_eq_xx_32_tf => cmp_xx(CmpOp::Eq, true, true, false); cmp_eq_xx_32_ft => cmp_xx(CmpOp::Eq, true, false, true); cmp_eq_xx_32_tt => cmp_xx(CmpOp::Eq, true, true, true); cmp_eq_xk_32 => cmp_node(CmpOp::Eq, false, true, true); cmp_eq_kx_32 => cmp_node(CmpOp::Eq, true, false, true); }
+    CmpOp::Ne => { cmp_ne_xx_ff => cmp_xx(CmpOp::Ne, false, false, false); cmp_ne_xx_tf => cmp_xx(CmpOp::Ne, false, true, false); cmp_ne_xx_ft => cmp_xx(CmpOp::Ne, false, false, true); cmp_ne_xx_tt => cmp_xx(CmpOp::Ne, false, true, true); cmp_ne_xk => cmp_node(CmpOp::Ne, false, true, false); cmp_ne_kx => cmp_node(CmpOp::Ne, true, false, false); cmp_ne_kk => cmp_node(CmpOp::Ne, true, true, false);
+        cmp_ne_xx_32_ff => cmp_xx(CmpOp::Ne, true, false, false); cmp_ne_xx_32_tf => cmp_xx(CmpOp::Ne, true, true, false); cmp_ne_xx_32_ft => cmp_xx(CmpOp::Ne, true, false, true); cmp_ne_xx_32_tt => cmp_xx(CmpOp::Ne, true, true, true); cmp_ne_xk_32 => cmp_node(CmpOp::Ne, false, true, true); cmp_ne_kx_32 => cmp_node(CmpOp::Ne, true, false, true); cmp_ne_kk_32 => cmp_node(CmpOp::Ne, true, true, true); }
+    CmpOp::Lt => { cmp_lt_xx_ff => cmp_xx(CmpOp::Lt, false, false, false); cmp_lt_xx_tf => cmp_xx(CmpOp::Lt, false, true, false); cmp_lt_xx_ft => cmp_xx(CmpOp::Lt, false, false, true); cmp_lt_xx_tt => cmp_xx(CmpOp::Lt, false, true, true); cmp_lt_xk => cmp_node(CmpOp::Lt, false, true, false); cmp_lt_kx => cmp_node(CmpOp::Lt, true, false, false); cmp_lt_kk => cmp_node(CmpOp::Lt, true, true, false);
+        cmp_lt_xx_32_ff => cmp_xx(CmpOp::Lt, true, false, false); cmp_lt_xx_32_tf => cmp_xx(CmpOp::Lt, true, true, false); cmp_lt_xx_32_ft => cmp_xx(CmpOp::Lt, true, false, true); cmp_lt_xx_32_tt => cmp_xx(CmpOp::Lt, true, true, true); cmp_lt_xk_32 => cmp_node(CmpOp::Lt, false, true, true); cmp_lt_kx_32 => cmp_node(CmpOp::Lt, true, false, true); cmp_lt_kk_32 => cmp_node(CmpOp::Lt, true, true, true); }
+    CmpOp::Le => { cmp_le_xx_ff => cmp_xx(CmpOp::Le, false, false, false); cmp_le_xx_tf => cmp_xx(CmpOp::Le, false, true, false); cmp_le_xx_ft => cmp_xx(CmpOp::Le, false, false, true); cmp_le_xx_tt => cmp_xx(CmpOp::Le, false, true, true); cmp_le_xk => cmp_node(CmpOp::Le, false, true, false); cmp_le_kx => cmp_node(CmpOp::Le, true, false, false); cmp_le_kk => cmp_node(CmpOp::Le, true, true, false);
+        cmp_le_xx_32_ff => cmp_xx(CmpOp::Le, true, false, false); cmp_le_xx_32_tf => cmp_xx(CmpOp::Le, true, true, false); cmp_le_xx_32_ft => cmp_xx(CmpOp::Le, true, false, true); cmp_le_xx_32_tt => cmp_xx(CmpOp::Le, true, true, true); cmp_le_xk_32 => cmp_node(CmpOp::Le, false, true, true); cmp_le_kx_32 => cmp_node(CmpOp::Le, true, false, true); cmp_le_kk_32 => cmp_node(CmpOp::Le, true, true, true); }
+    CmpOp::Gt => { cmp_gt_xx_ff => cmp_xx(CmpOp::Gt, false, false, false); cmp_gt_xx_tf => cmp_xx(CmpOp::Gt, false, true, false); cmp_gt_xx_ft => cmp_xx(CmpOp::Gt, false, false, true); cmp_gt_xx_tt => cmp_xx(CmpOp::Gt, false, true, true); cmp_gt_xk => cmp_node(CmpOp::Gt, false, true, false); cmp_gt_kx => cmp_node(CmpOp::Gt, true, false, false); cmp_gt_kk => cmp_node(CmpOp::Gt, true, true, false);
+        cmp_gt_xx_32_ff => cmp_xx(CmpOp::Gt, true, false, false); cmp_gt_xx_32_tf => cmp_xx(CmpOp::Gt, true, true, false); cmp_gt_xx_32_ft => cmp_xx(CmpOp::Gt, true, false, true); cmp_gt_xx_32_tt => cmp_xx(CmpOp::Gt, true, true, true); cmp_gt_xk_32 => cmp_node(CmpOp::Gt, false, true, true); cmp_gt_kx_32 => cmp_node(CmpOp::Gt, true, false, true); cmp_gt_kk_32 => cmp_node(CmpOp::Gt, true, true, true); }
+    CmpOp::Ge => { cmp_ge_xx_ff => cmp_xx(CmpOp::Ge, false, false, false); cmp_ge_xx_tf => cmp_xx(CmpOp::Ge, false, true, false); cmp_ge_xx_ft => cmp_xx(CmpOp::Ge, false, false, true); cmp_ge_xx_tt => cmp_xx(CmpOp::Ge, false, true, true); cmp_ge_xk => cmp_node(CmpOp::Ge, false, true, false); cmp_ge_kx => cmp_node(CmpOp::Ge, true, false, false); cmp_ge_kk => cmp_node(CmpOp::Ge, true, true, false);
+        cmp_ge_xx_32_ff => cmp_xx(CmpOp::Ge, true, false, false); cmp_ge_xx_32_tf => cmp_xx(CmpOp::Ge, true, true, false); cmp_ge_xx_32_ft => cmp_xx(CmpOp::Ge, true, false, true); cmp_ge_xx_32_tt => cmp_xx(CmpOp::Ge, true, true, true); cmp_ge_xk_32 => cmp_node(CmpOp::Ge, false, true, true); cmp_ge_kx_32 => cmp_node(CmpOp::Ge, true, false, true); cmp_ge_kk_32 => cmp_node(CmpOp::Ge, true, true, true); }
     Val::Field => { field_nr => field_with(Field::Nr, false); field_arch => field_with(Field::Arch, false); field_ip => field_with(Field::Ip, false); }
     Field::Nr => { field_nr_hi => field_with(Field::Nr, true); }
     Field::Arch => { field_arch_hi => field_with(Field::Arch, true); }
@@ -591,12 +591,12 @@ nodes! {
     // i32s: each op, each side a leaf or computed (computed both: the right biased into X);
     // a side not 32 bits refused
     Cond::SCmp => {
-        scmp_eq_xk => scmp_node(CmpOp::Eq, false, true); scmp_eq_kx => scmp_node(CmpOp::Eq, true, false); scmp_eq_kk => scmp_node(CmpOp::Eq, true, true); scmp_eq_xx => scmp_node(CmpOp::Eq, false, false);
-        scmp_ne_xk => scmp_node(CmpOp::Ne, false, true); scmp_ne_kx => scmp_node(CmpOp::Ne, true, false); scmp_ne_kk => scmp_node(CmpOp::Ne, true, true); scmp_ne_xx => scmp_node(CmpOp::Ne, false, false);
-        scmp_lt_xk => scmp_node(CmpOp::Lt, false, true); scmp_lt_kx => scmp_node(CmpOp::Lt, true, false); scmp_lt_kk => scmp_node(CmpOp::Lt, true, true); scmp_lt_xx => scmp_node(CmpOp::Lt, false, false);
-        scmp_le_xk => scmp_node(CmpOp::Le, false, true); scmp_le_kx => scmp_node(CmpOp::Le, true, false); scmp_le_kk => scmp_node(CmpOp::Le, true, true); scmp_le_xx => scmp_node(CmpOp::Le, false, false);
-        scmp_gt_xk => scmp_node(CmpOp::Gt, false, true); scmp_gt_kx => scmp_node(CmpOp::Gt, true, false); scmp_gt_kk => scmp_node(CmpOp::Gt, true, true); scmp_gt_xx => scmp_node(CmpOp::Gt, false, false);
-        scmp_ge_xk => scmp_node(CmpOp::Ge, false, true); scmp_ge_kx => scmp_node(CmpOp::Ge, true, false); scmp_ge_kk => scmp_node(CmpOp::Ge, true, true); scmp_ge_xx => scmp_node(CmpOp::Ge, false, false);
+        scmp_eq_xk => scmp_node(CmpOp::Eq, false, true); scmp_eq_kx => scmp_node(CmpOp::Eq, true, false); scmp_eq_kk => scmp_node(CmpOp::Eq, true, true); scmp_eq_xx_ff => scmp_xx(CmpOp::Eq, false, false); scmp_eq_xx_tf => scmp_xx(CmpOp::Eq, true, false); scmp_eq_xx_ft => scmp_xx(CmpOp::Eq, false, true); scmp_eq_xx_tt => scmp_xx(CmpOp::Eq, true, true);
+        scmp_ne_xk => scmp_node(CmpOp::Ne, false, true); scmp_ne_kx => scmp_node(CmpOp::Ne, true, false); scmp_ne_kk => scmp_node(CmpOp::Ne, true, true); scmp_ne_xx_ff => scmp_xx(CmpOp::Ne, false, false); scmp_ne_xx_tf => scmp_xx(CmpOp::Ne, true, false); scmp_ne_xx_ft => scmp_xx(CmpOp::Ne, false, true); scmp_ne_xx_tt => scmp_xx(CmpOp::Ne, true, true);
+        scmp_lt_xk => scmp_node(CmpOp::Lt, false, true); scmp_lt_kx => scmp_node(CmpOp::Lt, true, false); scmp_lt_kk => scmp_node(CmpOp::Lt, true, true); scmp_lt_xx_ff => scmp_xx(CmpOp::Lt, false, false); scmp_lt_xx_tf => scmp_xx(CmpOp::Lt, true, false); scmp_lt_xx_ft => scmp_xx(CmpOp::Lt, false, true); scmp_lt_xx_tt => scmp_xx(CmpOp::Lt, true, true);
+        scmp_le_xk => scmp_node(CmpOp::Le, false, true); scmp_le_kx => scmp_node(CmpOp::Le, true, false); scmp_le_kk => scmp_node(CmpOp::Le, true, true); scmp_le_xx_ff => scmp_xx(CmpOp::Le, false, false); scmp_le_xx_tf => scmp_xx(CmpOp::Le, true, false); scmp_le_xx_ft => scmp_xx(CmpOp::Le, false, true); scmp_le_xx_tt => scmp_xx(CmpOp::Le, true, true);
+        scmp_gt_xk => scmp_node(CmpOp::Gt, false, true); scmp_gt_kx => scmp_node(CmpOp::Gt, true, false); scmp_gt_kk => scmp_node(CmpOp::Gt, true, true); scmp_gt_xx_ff => scmp_xx(CmpOp::Gt, false, false); scmp_gt_xx_tf => scmp_xx(CmpOp::Gt, true, false); scmp_gt_xx_ft => scmp_xx(CmpOp::Gt, false, true); scmp_gt_xx_tt => scmp_xx(CmpOp::Gt, true, true);
+        scmp_ge_xk => scmp_node(CmpOp::Ge, false, true); scmp_ge_kx => scmp_node(CmpOp::Ge, true, false); scmp_ge_kk => scmp_node(CmpOp::Ge, true, true); scmp_ge_xx_ff => scmp_xx(CmpOp::Ge, false, false); scmp_ge_xx_tf => scmp_xx(CmpOp::Ge, true, false); scmp_ge_xx_ft => scmp_xx(CmpOp::Ge, false, true); scmp_ge_xx_tt => scmp_xx(CmpOp::Ge, true, true);
         scmp_wide => scmp_wide_node();
     }
     Cond::IsNull => { isnull_64 => isnull_node(false); isnull_32 => isnull_node(true); }
@@ -765,10 +765,19 @@ fn carm_fit(fit: bool, guard: Option<St>, sb: St, sr: St) {
 /// `a op b`, the children's facts given: each a leaf or computed (`la`, `lb`), both high halves
 /// known 0 (`hz`) or not.
 fn cmp_node(op: CmpOp, la: bool, lb: bool, hz: bool) {
-    // which side uses X: the template swaps a computed left that does, over a right that doesn't
-    for (ua, ub) in [(false, false), (true, false), (false, true), (true, true)] {
-        cmp_at(op, la, lb, hz, ua, ub)
+    // a computed side using X or not (a leaf's code doesn't); both computed: `cmp_xx`, a
+    // harness per combination (the template swaps a computed left that does, over a right
+    // that doesn't)
+    for ux in [false, true] {
+        cmp_at(op, la, lb, hz, ux && !la, ux && !lb);
+        if la && lb {
+            break;
+        }
     }
+}
+
+fn cmp_xx(op: CmpOp, hz: bool, ua: bool, ub: bool) {
+    cmp_at(op, false, false, hz, ua, ub)
 }
 
 fn cmp_at(op: CmpOp, la: bool, lb: bool, hz: bool, ua: bool, ub: bool) {
@@ -797,9 +806,16 @@ fn typed_with(ty: Ty) {
 /// `a op b` of i32s, each side a leaf or computed (using X or not): the values any i32s' bits
 /// (zero-extended).
 fn scmp_node(op: CmpOp, la: bool, lb: bool) {
-    for (ua, ub) in [(false, false), (true, false), (false, true), (true, true)] {
-        scmp_at(op, la, lb, ua, ub)
+    for ux in [false, true] {
+        scmp_at(op, la, lb, ux && !la, ux && !lb);
+        if la && lb {
+            break;
+        }
     }
+}
+
+fn scmp_xx(op: CmpOp, ua: bool, ub: bool) {
+    scmp_at(op, false, false, ua, ub)
 }
 
 fn scmp_at(op: CmpOp, la: bool, lb: bool, ua: bool, ub: bool) {
